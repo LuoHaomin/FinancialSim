@@ -1,6 +1,7 @@
 <script lang="ts">
   // L1 宏观看板 (实验模式): 加载场景 → 跑 → 曲线 → 干预 → 审计闭环
   import MacroChart from './lib/MacroChart.svelte'
+  import AgentsView from './lib/AgentsView.svelte'
   import { api, SCENARIOS, SHOCK_PRESETS } from './lib/api'
   import {
     simId, meta, paused, series, shocks,
@@ -10,6 +11,7 @@
   let scenario = 'baseline'
   let error = ''
   let busy = false
+  let view: 'dashboard' | 'agents' = 'dashboard'
 
   let shockPreset = SHOCK_PRESETS[0].id
   let shockOffset = 0
@@ -96,11 +98,15 @@
 
   {#if error}<p class="err">{error}</p>{/if}
 
+  {#if view === 'dashboard'}
   <section class="chart">
     <MacroChart />
   </section>
+  {:else}
+  <AgentsView />
+  {/if}
 
-  <section class="panel">
+  <section class="panel" id="interventions">
     <h3>政策 / 冲击干预</h3>
     <div class="row">
       <select bind:value={shockPreset}>
@@ -146,6 +152,7 @@
                flex-wrap: wrap; margin: 10px 0; }
   .sep { border-left: 1px solid #ddd; height: 22px; margin: 0 4px; }
   button, select { padding: 5px 12px; cursor: pointer; }
+  .active { background: #d8e7ff; }
   button:disabled { cursor: not-allowed; opacity: .5; }
   .chart { border: 1px solid #eee; padding: 6px; margin: 12px 0; }
   .panel { margin-top: 14px; }

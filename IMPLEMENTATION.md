@@ -494,6 +494,17 @@ SFC 注记: 回购 = 以证券质押借入现金，记: 资产端 cash↑ / 负�
 > **MVP 边界（已决策）**: 实验模式看板+干预为主轴（W1-W4 全量, W5 降级为可选）;
 > 单机自用; 中文直出; 场景编辑器(W6 前半)与教程课程(W6 后半)整体延后二期.
 
+#### W3 — Svelte L1 宏观看板 ✅（2026-08-27）
+交付: `frontend/` (Svelte5+TS+Vite+ECharts); tickStore(WS 实时+REST 补数);
+MacroChart 双轴时序+冲击 markLine; 实验模式看板中文直出.
+端到端实测: 真 uvicorn 下建仿真 speed=10 → 51 tick 时序 served.
+工具链坑: rolldown 要求 `.svelte` 导入写全扩展名.
+
+#### W4 — L2/L3 部门下钻 ✅（2026-08-27）
+交付: AgentsView 组件 — 企业/银行 Tab 表格 (员工/价格/CAR/状态), 点击行
+展开 L3 资产负债表三栏视图(资产|负债+资本|净值指标). 看板导航切换.
+MVP 主链路闭环: 场景→仿真→宏观曲线→干预→审计→部门下钻.
+
 #### W1 — API 骨架 + 只读投影 ✅（2026-08-27）
 交付: `financial_sim/ui_service/`(registry/projection/main) + fastapi/uvicorn/httpx2 依赖.
 端点: POST/GET/DELETE `/api/sims`、`command`(speed/step)、`series`、

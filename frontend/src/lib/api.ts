@@ -26,6 +26,31 @@ export interface SeriesData {
   housing_price: (number | null)[]
 }
 
+export interface FirmRow {
+  id: string; sector: string; employees: number; price: number
+  deposits: number; debt: number; last_sales: number; is_bankrupt: boolean
+}
+
+export interface BankRow {
+  id: string; capital: number; car: number | null; reserves: number
+  loans_to_firms: number; loans_to_households: number; is_failed: boolean
+}
+
+export interface AssetLiabilityView {
+  sector: string; id: string
+  assets: Record<string, number>
+  liabilities?: Record<string, number>
+  net_worth?: number
+  capital?: number
+  car?: number | null
+  operational?: Record<string, unknown>
+  is_failed?: boolean
+}
+
+export interface ShockLogEntry {
+  t: number; name: string; channel: string; magnitude: number
+}
+
 async function j<T>(r: Response): Promise<T> {
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
   return r.json()
@@ -38,7 +63,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scenario }),
     })
-    return ((await j<{ sim_id: string }>(r)).sim_id)
+    return (await j<{ sim_id: string }>(r)).sim_id
   },
   meta: (id: string) => fetch(`/api/sims/${id}`).then((r) => j<SimMeta>(r)),
   series: (id: string) =>
@@ -50,26 +75,23 @@ export const api = {
       body: JSON.stringify(cmd),
     }).then((r) => j(r)),
   async interventions(id: string) {
-    return j<
-      { t: number; name: string; channel: string; magnitude: number }[]
-    >(await fetch(`/api/sims/${id}/interventions`))
+    return j<ShockLogEntry[]>(await fetch(`/api/sims/${id}/interventions`))
   },
-  async intervention(
+  intervention: (
     id: string,
-    body: {
-      preset: string
-      trigger_offset: number
-      duration?: number
-    },
-  ) {
-    const r = await fetch(`/api/sims/${id}/interventions`, {
+    body: { preset: string; trigger_offset: number; duration?: number },
+  ) =>
+    fetch(`/api/sims/${id}/interventions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    })
-    if (!r.ok) throw new Error(await r.text())
-    return r.json()
-  },
+    }).then((r) => j(r)),
+  agentsTable: (id: string, sector: 'firms' | 'banks') =>
+    fetch(`/api/sims/${id}/agents/${sector}`)
+      .then((r) => j<(FirmRow | BankRow)[]>(r)),
+  agentDetail: (id: string, sector: string, agentId: string) =>
+    fetch(`/api/sims/${id}/agent/${sector}/${agentId}`)
+      .then((r) => j<AssetLiabilityView>(r)),
 }
 
 export const SCENARIOS = [
