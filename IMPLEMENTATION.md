@@ -10,6 +10,8 @@
 
 **测试基线**: 325 passed · 1 xfail · ruff clean · 7 场景 × 多种子零 SFC 违反
 
+**前端设计定稿**: [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) (Phase 4 实现计划见 §6)
+
 ### Phase 3 Week D-M2 + Week F（2026-08-27 完成, Phase 3 收官）
 
 | 项 | 状态 | 说明 |
@@ -251,7 +253,8 @@ Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、�
 | 2. 现状结构 | 实际代码目录 + Phase 3 装点 | 熟悉代码时 |
 | 3. 测试策略 | 金字塔与原则 | 全程 |
 | 4. 历史存档摘要 | Phase 0-2 的取舍与教训 | 回溯设计动机时 |
-| 5. **Phase 3-5 实施方案** | **前置批次 + 逐周计划 + 记账规格 + 未决问题** | **当前主文档** |
+| 5. **Phase 3-5 实施方案** | 前置批次 + 逐周计划 + 记账规格 + 未决问题 |
+| 5b. **前端设计方案** | [FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md): Phase 4 架构/协议/页面 | 进 UI 前 |
 | 6. 关键依赖 | 实现顺序依据 | 调整顺序时 |
 | 7. 附录：早期决策记录 | Q1-Q6 已采纳默认值 | 需要背景时 |
 
@@ -484,20 +487,57 @@ SFC 注记: 回购 = 以证券质押借入现金，记: 资产端 cash↑ / 负�
 
 ### Phase 4：教学层（计划 6 周）
 
-> 原则: UI 是仿真的只读投影 + 受控干预通道，模型核心不因前端改动。
+> 设计方案已定稿：[docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md)
+> （技术栈 FastAPI + Svelte 5 + ECharts/D3；四层下钻；干预即 ShockEvent）
+> 本节为实现计划（里程碑按依赖排序，每项含验收）。
 
-| 周 | 模块 | 技术要点 |
-|---|---|---|
-| G1 | FastAPI 服务层 | `POST /sim/create`(seed/config)、`GET /sim/{id}/series`、快照即数据源(snapshot v2 直接复用)；所有状态输出经 Polars DataFrame 聚合 |
-| G1 | 干预 DSL | 干预=构造 ShockEvent 进 EventManager（复用现有系统保证可复现/可审计），禁止直接改 agent 状态 |
-| G2 | WebSocket tick 流 | 后台线程跑仿真，推送 MacroSnapshot 增量；断线用快照恢复续跑（ReplayManager） |
-| G3-4 | Svelte 前端: 4 层下钻 | L1 宏观时序(ECharts) → L2 部门/主体列表 → L3 单主体资产负债表+流量 → L4 网络图(D3: 同业/供应链/持股三视图) |
-| G5 | 场景编辑器 | 表单 → SimConfig YAML 校验(pydantic schema 即接口)；预设模板一键加载 |
-| G6 | 教程/引导任务 | 3 个交互式课程（通胀、金融危机、货币政策），每课 = 固定 seed + 分步干预脚本 |
+#### W1 — API 骨架 + 只读投影
+| 内容 | 说明 |
+|---|---|
+| `ui_service/` 包 | main.py app 工厂 / registry.py(SimulationRegistry+后台线程) / projection.py |
+| 端点 | `POST /api/sims`, `GET series/agent/network`, `GET interventions` |
+| tick 推送 | WS `/api/sims/{id}/ws` 下行 tick 帧 + set_speed/pause/step 上行 |
+| 测试 | FastAPI TestClient 冒烟: 建仿真→跑12月→拉时序断言长度与单调 t |
+验收: 全部端点有测试; 投影只读(不触碰 agent 写路径), 同 seed 复现不受服务层影响.
 
-工程约束: pydantic SimConfig 直接生成前端表单 JSON Schema；UI 层零科学计算;
-Playwright e2e 冒烟测试入 CI。验收: 5 分钟内完成"加息 300bp 观察衰退"教学流程;
-100 个并发只读连接不掉帧; 干预操作 100% 进入 shock_log 可回放。
+#### W2 — 干预网关（唯一写通道）
+| 内容 | 说明 |
+|---|---|
+| gateway.py | REST body → pydantic 校验 → 构造 ShockEvent 注入 EventManager(加锁) |
+| 回执与审计 | intervention_ack{shock_log_seq}; GET interventions 只读审计表 |
+| 可复现测试 | 相同 seed+相同干预序列两次运行 macro_history 逐位一致 |
+验收: 每条干预都出现在 shock_log; 非法 channel/magnitude 422 且不入账.
+
+#### W3 — Svelte SPA: L1 宏观看板
+| 内容 | 说明 |
+|---|---|
+| 脚手架 | Vite+Svelte5+TS; tickStore/metaStore; ECharts MacroChart |
+| 断线恢复 | last_t 补数(series?from=) + WS 重订阅 |
+验收: Playwright 冒烟①——加载→自动跑→图表出线→暂停可用.
+
+#### W4 — L2/L3 部门下钻 + 单主体资产负债表
+| 内容 | 说明 |
+|---|---|
+| 列表页 | 家庭分位数视图/企业/银行/政府/NBFI Tab + sparkline |
+| 详情页 | 左右分栏 BS + 科目 12 月走势; 家庭按 id 搜索 |
+验收: 任一主体可从 L2 两跳内到达其资产负债表; 数字与 L1 时序一致.
+
+#### W5 — L4 网络三视图
+| 内容 | 说明 |
+|---|---|
+| D3 force | interbank(骨架期显示静态拓扑)/供应链(断供灰化闪烁)/交叉持股 |
+| 数据 | GET network/{view}?t= 边表投影 |
+验收: 危机场景下能肉眼看到失败银行节点与断供传播时序.
+注: 同业动态敞口依赖 Phase 3.5 E2, 图层先行用骨架数据源.
+
+#### W6 — 场景编辑器 + 教程课程
+| 内容 | 说明 |
+|---|---|
+| 编辑器 | SimConfig JSON Schema 表单 + 冲击编排器(PRESET_SHOCKS×offsets 时间轴) |
+| 导出 | 保存为 scenarios/*.yaml 兼容格式 |
+| 三门教程 | 《通胀来了》《金融危机》《供给冲击》: 固定 seed+脚本化干预+预期现象核对卡 |
+验收: 5 分钟完成"加息300bp观察衰退"全流程; 干预操作 100% 进 shock_log;
+Playwright 冒烟②③入 CI. 工程约束全程生效: UI 层零科学计算.
 
 ---
 
