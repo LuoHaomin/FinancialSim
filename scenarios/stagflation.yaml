@@ -1,0 +1,24 @@
+# 滞胀场景 (Week F): 供给冲击 + 工资螺旋 + 紧货币.
+#
+# 设计目标: 高通胀与高失业并存, Taylor rule 被迫大幅加息.
+# 校验点: 通胀显著为正的同时失业率上升; SFC 全程干净.
+
+name: stagflation
+description: |
+  1970s 型滞胀: 能源冲击(+30%, 持续12月) 叠加工资冲击(+10%),
+  随后货币政策紧缩. 检验供给驱动型衰退下政策规则的稳定性.
+
+seed: 11
+n_ticks: 60
+n_households: 200
+
+taylor_inflation_coeff: 1.5
+taylor_output_coeff: 0.5
+gov_spending_share_gdp: 0.45
+
+enable_events: true
+preset_shocks:
+  - energy_shock_plus30p
+  - wage_shock_plus10p
+  - tightening_50bp_6m
+trigger_offsets: [6, 8, 14]

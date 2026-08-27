@@ -396,6 +396,7 @@ class Simulation:
                 for h in households:
                     swapped = h.stock_units * beta_am
                     h.stock_units -= swapped
+                    h.fund_units += swapped            # 家庭端份额登记 (M2)
                     asset_manager.stock_units += swapped
                     asset_manager.fund_units_outstanding += swapped
 

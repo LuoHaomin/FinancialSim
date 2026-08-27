@@ -1321,16 +1321,99 @@ def _asset_manager_cycle(state: SimulationState) -> None:
         am.nav_history[-1] if am.nav_history else am.nav(price)
     )
     nav_ret = am.nav(price) / max(nav_prev, 1e-9) - 1.0
+    nav_now = am.nav(max(mkt.price, 1e-9))
 
-    # 风险预算驱动的再平衡 (家庭端申赎接线留下一里程碑):
-    # 净值下跌 → 提高现金缓冲比例 → 被动卖出压价 → NAV 再跌 (螺旋核)
+    # ── D-M2: 家庭端申赎清算 (闭环赎回螺旋) ──
+    # 赎回: 业绩越差赎回越多 → AM 现金不足时被动抛售(压价) → 净值再跌.
     base_rr = float(_cfg(state, "am_base_redemption_rate", 0.02))
     sens = float(_cfg(state, "am_redemption_sensitivity", 1.5))
+    redeem_rate = min(0.30, base_rr + sens * max(0.0, -nav_ret))
+    redeem_value = min(
+        redeem_rate * am.fund_units_outstanding * nav_now,
+        max(0.0, am.deposits)
+        + max(0.0, am.stock_units) * price,
+    )
+    if redeem_value > 1e-9:
+        from_cash = min(redeem_value, am.deposits)
+        deficit = redeem_value - from_cash
+        if deficit > 1e-9:
+            # 现金池不足 → 被动卖出 (fire-sale 压价 → 正反馈通道)
+            impact = float(_cfg(state, "fire_sale_price_impact", 0.05))
+            nominal = deficit
+            filled = _cross_trade_with_households(state, -nominal, price)
+            sell_units = filled / price
+            am.stock_units -= sell_units
+            am.deposits += filled
+            bank.deposits_from_nbfi += filled
+            bank.deposits_from_hh -= filled
+            press = impact * min(
+                1.0, sell_units / max(mkt.depth_scale(), 1e-9)
+            )
+            mkt.price *= 1.0 - min(0.10, press)
+        # ⚠️ 实际可支付额 = 现金池余额 (from_cash + 强平实收).
+        # 用名义 redeem_value 支付会造成无对手方的付款 → SFC 违反.
+        payable = max(0.0, am.deposits)
+        # 向家庭按份额比例支付赎回款 (nbfi→hh 科目转移, 恒等式零净额)
+        fund_total = sum(h.fund_units for h in state.households)
+        if payable > 1e-9 and fund_total > 1e-9:
+            n_hhs = len(state.households)
+            paid_total = 0.0
+            for i, h in enumerate(state.households):
+                amt = (
+                    payable * h.fund_units / fund_total
+                    if i < n_hhs - 1
+                    else payable - paid_total
+                )
+                redeemed_u = (
+                    amt / nav_now if nav_now > 1e-9 else h.fund_units
+                )
+                redeemed_u = min(redeemed_u, h.fund_units)
+                h.fund_units -= redeemed_u
+                h.deposits += amt
+                paid_total += amt
+            am.deposits -= payable
+            am.fund_units_outstanding = max(
+                0.0, am.fund_units_outstanding - paid_total / nav_now
+            )
+            bank.deposits_from_nbfi -= payable
+            bank.deposits_from_hh += payable
+        am.redemption_rate = redeem_rate
+
+    # 申购: 净值上涨动量期小幅流入 (家庭按存款比例支付认购款)
+    momentum_sub = (
+        float(_cfg(state, "am_subscription_momentum", 0.01))
+        if nav_ret > 0 else 0.0
+    )
+    if momentum_sub > 0:
+        sub_value = min(
+            momentum_sub * sum(h.deposits for h in state.households),
+            sum(h.deposits for h in state.households),
+        )
+        if sub_value > 1e-9:
+            n_hhs = len(state.households)
+            dep_pool = sum(h.deposits for h in state.households)
+            collected = 0.0
+            for i, h in enumerate(state.households):
+                amt = (
+                    sub_value * h.deposits / dep_pool
+                    if i < n_hhs - 1
+                    else sub_value - collected
+                )
+                amt = min(amt, h.deposits)
+                h.deposits -= amt
+                h.fund_units += amt / nav_now
+                collected += amt
+            am.deposits += collected
+            am.fund_units_outstanding += collected / nav_now
+            bank.deposits_from_hh -= collected
+            bank.deposits_from_nbfi += collected
+
+    # 风险预算再平衡余核: 现金缓冲超配时缓慢回归市场 (对手方=家庭)
     cash_buffer_target = min(
         0.60,
         base_rr + sens * max(0.0, -nav_ret),
     )
-    total_assets = max(am.assets_value(price), 1e-9)
+    total_assets = max(am.assets_value(max(mkt.price, 1e-9)), 1e-9)
     current_buffer = am.deposits / total_assets
     gap_value = (cash_buffer_target - current_buffer) * total_assets
 

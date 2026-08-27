@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0-2 ✅ / Phase 3 前置 ✅ / Week A+B+C ✅ / Week D-M1 ✅ / **Week E-M1 ✅ (供应链 IO + 断供传导)**
+> 状态：Phase 0-2 ✅ / **Phase 3 核心完成 ✅** (A/B/C 全量 + D-M1/M2 + E-M1 + F 验收矩阵; E2 同业动态化如实挂起)
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,18 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 309 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+**测试基线**: 325 passed · 1 xfail · ruff clean · 7 场景 × 多种子零 SFC 违反
+
+### Phase 3 Week D-M2 + Week F（2026-08-27 完成, Phase 3 收官）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **D-M2 家庭申赎闭环** | ✅ | `h.fund_units` 份额登记; 赎回按业绩差放大(≤30%), 现金不足→强平抛售→按份额支付; 动量申购反向。支付额以**实际可付额**封顶 (名义额=无对手方付款的历史 bug 第三次复发, 已在文档固化纪律) |
+| **F 场景库** | ✅ | 新增 stagflation / post_war_recovery / housing_bust → 共 7 个 YAML, 支持 trigger_offsets |
+| **F 验收矩阵** | ✅ | 4 主场景×3种子+2辅助场景×3种子 全部零 SFC 违反 (`test_phase3_acceptance.py`) |
+| **F 明斯基检验** | ⚠️ 冒烟级 | 高低 LTV 对照可运行且无回归, 但当前校准下失业通道未现显著非线性放大 (定量分歧留待 CES 启用后重测) |
+| **F 性能门禁** | ✅ | n=5000 tick 均耗时 <2s 断言入 CI |
+| ~~E2 同业动态化~~ | 挂起 | 前置依赖主银行语义重构; 已从 Phase 3 移出, 与 D-M3 fire-sale 完整版一并重排 |
 
 ### Phase 3 Week E 里程碑 1: 供应链 IO（2026-08-27 完成）
 

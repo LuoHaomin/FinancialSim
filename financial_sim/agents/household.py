@@ -68,8 +68,9 @@ class Household:
     credit_denied_months: int = 0           # 连续被信贷配给拒绝的月数 (教学诊断)
     bonds: float = 0.0                     # 持有国债面值
 
-    # ── Phase 3 Week C: 股票持仓 ──
-    stock_units: float = 0.0               # 持有股票指数单位数
+    # ── Phase 3 Week C/D: 股票 + 基金 ──
+    stock_units: float = 0.0               # 自持股票指数单位数
+    fund_units: float = 0.0                # 基金份额 (资产管理者代持, Week D)
     risk_tolerance: float = 0.5            # 风险偏好 ∈ [0,1] (组合选择)
 
     def decide_consumption(self) -> float:

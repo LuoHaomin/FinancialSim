@@ -1,0 +1,22 @@
+# 战后复苏场景 (Week F): 双轮财政刺激 + 宽松货币.
+#
+# 设计目标: 从温和收缩中复苏 — GDP 回升, 失业回落, 无金融危机.
+
+name: post_war_recovery
+description: |
+  战后重建型复苏: 两轮财政刺激(20%, 各12月)+宽松利率.
+  初始利率压低到接近下限, 检验财政主导下的需求扩张路径.
+
+seed: 21
+n_ticks: 60
+n_households: 200
+
+cb_policy_rate_initial: 0.005
+gov_spending_share_gdp: 0.50
+
+enable_events: true
+preset_shocks:
+  - fiscal_stimulus_20p_12m
+  - easing_50bp_6m
+  - fiscal_stimulus_20p_12m
+trigger_offsets: [6, 10, 30]

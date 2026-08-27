@@ -1,0 +1,22 @@
+# 房产泡沫破裂场景 (Week F): 纯房产渠道压力测试.
+#
+# 与 crisis_2008 的区别: 不含财政/货币冲击, 隔离房地产-抵押-银行传导链,
+# 用于量化 fire-sale 外部性与断供螺旋的单独贡献.
+
+name: housing_bust
+description: |
+  房产泡沫破裂: 房价风险溢价飙升 x2 (无宏观政策冲击).
+  观察抵押违约 → NPL → REO fire-sale → 更多负资产的闭环强度.
+
+seed: 31
+n_ticks: 60
+n_households: 200
+
+enable_housing: true
+enable_events: true
+preset_shocks:
+  - housing_risk_premium_spike
+  - housing_risk_premium_spike
+trigger_offsets: [6, 18]
+
+wealth_effect_coef: 0.05
