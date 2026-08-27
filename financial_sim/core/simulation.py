@@ -324,9 +324,35 @@ class Simulation:
                     config.hh_risk_tolerance_mean,
                     config.hh_risk_tolerance_std, 0.01, 1.0, n_hh,
                 )
+                # ── Week C M3: 交叉持股 — 发行人把 beta 比例股数划给企业股东 ──
+                cross_net = None
+                if bool(getattr(config, "enable_cross_holdings", False)):
+                    from financial_sim.network.cross_holdings import (
+                        build_cross_holdings,
+                    )
+                    ch_rng = self.rng.stream("cross_holdings")
+                    cross_net = build_cross_holdings(
+                        firms,
+                        beta=float(getattr(config, "cross_hold_beta", 0.2)),
+                        rng=ch_rng,
+                        m_links=int(getattr(config, "cross_hold_m_links", 2)),
+                    )
+                issued_to_firms = (
+                    cross_net.issued_units_to_firms() if cross_net else {}
+                )
+
+                hh_supply = total_supply - sum(issued_to_firms.values())
                 for i, h in enumerate(households):
                     h.risk_tolerance = float(tol_draws[i])
-                    h.stock_units = total_supply * h.deposits / hh_dep_init
+                    h.stock_units = hh_supply * h.deposits / hh_dep_init
+                if cross_net is not None:
+                    cross_edges = {
+                        hid: dict(tgt) for hid, tgt in cross_net.edges.items()
+                    }
+                    for f in firms:
+                        f.shares_held_by_firms = float(
+                            issued_to_firms.get(f.id, 0.0)
+                        )
 
         return SimulationState(
             t=0,
@@ -353,6 +379,9 @@ class Simulation:
             interbank_network=interbank,
             bond_market=bond_market,
             stock_market=stock_market,
+            cross_holdings=cross_edges if bool(
+                getattr(config, "enable_cross_holdings", False)
+            ) else {},
         )
 
     # ════════════════════════════════════════════════════════════

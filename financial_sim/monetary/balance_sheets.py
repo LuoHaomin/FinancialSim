@@ -70,19 +70,25 @@ class FirmBalanceSheet:
     inventories: float = 0.0
     capital_stock: float = 0.0
     interfirm_claims: float = 0.0
+    stocks: float = 0.0                    # 持有其他企业股权市值 (Week C M3)
     # ── 负债 ──
     bank_loans: float = 0.0
     bonds_issued: float = 0.0
     accounts_payable: float = 0.0
+    minority_equity: float = 0.0           # 被其他企业持有的本企业股权 (镜像科目)
 
     def sum_assets(self) -> float:
         return (
             self.cash + self.deposits + self.inventories
             + self.capital_stock + self.interfirm_claims
+            + self.stocks
         )
 
     def sum_liabilities(self) -> float:
-        return self.bank_loans + self.bonds_issued + self.accounts_payable
+        return (
+            self.bank_loans + self.bonds_issued
+            + self.accounts_payable + self.minority_equity
+        )
 
     @property
     def net_worth(self) -> float:

@@ -183,6 +183,11 @@ class SimConfig(BaseModel):
     portfolio_weight_tol_coeff: float = 0.40  # 目标权重 = base + coeff×risk_tolerance
     portfolio_rebalance_speed: float = 0.20   # 每月向目标权重迁移比例
 
+    # ── Week C M3: 交叉持股骨架 ──
+    enable_cross_holdings: bool = False      # 默认关闭 (骨架; 经济效应 Week D 接入)
+    cross_hold_beta: float = 0.2             # 发行人划给企业股东的股数比例
+    cross_hold_m_links: int = 2              # 每发行人持有的持有人连接数 (BA)
+
     # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
     enable_firm_dividends: bool = True
     firm_dividend_payout: float = 0.40        # 每月对"工资单倍数以上"现金的分红比例

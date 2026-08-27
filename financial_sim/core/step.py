@@ -781,41 +781,91 @@ def _firm_dividend_cycle(state: SimulationState) -> None:
     if total_div <= 0:
         return
 
-    # 分配权重: 股市启用时按持股 (股东语义, R2 基本面锚依赖真实股息),
-    # 否则回退按存款比例. 残差给最后一户.
+    # 分配权重: 股市启用时按持股 (股东语义含企业股东 M3),
+    # 否则回退按存款比例. 残差给最后一个收款人.
     mkt = getattr(state, "stock_market", None)
     use_shares = (
         bool(_cfg(state, "enable_stock_market", False))
         and mkt is not None
         and sum(h.stock_units for h in state.households) > 0
     )
+    firm_shareholders: list[tuple[object, float]] = []
+    if use_shares and bool(_cfg(state, "enable_cross_holdings", False)):
+        for f in state.firms:
+            if f.shares_held_by_firms > 0:
+                firm_shareholders.append((f, f.shares_held_by_firms))
+    hh_weights = [h.stock_units for h in state.households]
     weights_sum = (
-        sum(h.stock_units for h in state.households)
+        sum(hh_weights) + sum(w for _, w in firm_shareholders)
         if use_shares
         else sum(h.deposits for h in state.households)
     )
     if weights_sum <= 0:
         return
+    bank2 = state.bank
+    assert bank2 is not None
+    div_to_firms_total = 0.0
+
+    def _pay_firm_shareholders(amount: float) -> None:
+        """把 amount 按持股分给企业股东 (残差给最后一家)."""
+        nonlocal div_to_firms_total
+        if amount <= 1e-9 or not firm_shareholders:
+            return
+        total_w = sum(w for _, w in firm_shareholders)
+        paid = 0.0
+        n = len(firm_shareholders)
+        for i, (f, w) in enumerate(firm_shareholders):
+            amt = (
+                amount * w / total_w
+                if i < n - 1
+                else amount - paid
+            )
+            f.deposits += amt
+            f.dividend_received_from_firms = amt
+            paid += amt
+        bank2.deposits_from_firms += amount
+        div_to_firms_total += amount
+
+    total_div_hh = total_div
+    if use_shares and firm_shareholders:
+        firms_weight = sum(w for _, w in firm_shareholders)
+        share_of_total = firms_weight / (
+            sum(hh_weights) + firms_weight
+        )
+        total_div_hh = total_div * (1.0 - share_of_total)
+        _pay_firm_shareholders(total_div * share_of_total)
+
     distributed = 0.0
-    eligible = state.households
-    for i, h in enumerate(eligible):
-        w = h.stock_units if use_shares else h.deposits
+    eligible = [
+        (h, (h.stock_units if use_shares else h.deposits))
+        for h in state.households
+    ]
+    weights_sum = (
+        sum(w for _, w in eligible)
+        if use_shares
+        else sum(w for _, w in eligible)
+    )
+    if weights_sum <= 0:
+        return
+    n = len(eligible)
+    for i, (h, w) in enumerate(eligible):
         pay = (
-            total_div * w / weights_sum
-            if i < len(eligible) - 1
-            else total_div - distributed
+            total_div_hh * w / weights_sum
+            if i < n - 1
+            else total_div_hh - distributed
         )
         h.deposits += pay
         distributed += pay
-    state.last_month_dividends = total_div  # 下月股票市场基本面锚
+    state.last_month_dividends = total_div  # 股息锚含企业部分 (总量口径)
 
     paid = 0.0
     for i, (f, div) in enumerate(allocs):
         deduct = div if i < len(allocs) - 1 else (total_div - paid)
         f.deposits -= deduct
         paid += deduct
-    bank.deposits_from_firms -= total_div
-    bank.deposits_from_hh += total_div
+    bank.deposits_from_firms -= total_div            # 付款方扣减 (全额)
+    bank.deposits_from_hh += total_div_hh            # 家庭股东收款
+    # 企业股东部分已由 _pay_firm_shareholders 内镜像入 deposits_from_firms
 
 
 # ════════════════════════════════════════════════════════════

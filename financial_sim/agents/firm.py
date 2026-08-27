@@ -39,6 +39,8 @@ class Firm:
 
     # ── Phase 3 Week C: 股权 ──
     shares_outstanding: int = 0            # IPO 后发行股数 (0 = 未上市)
+    shares_held_by_firms: float = 0.0      # 已发行到企业股东名下的股数 (M3)
+    dividend_received_from_firms: float = 0.0  # 当月作为股东收到的企业分红
     demand_history: list[float] | None = None  # 需求意向历史 (Week B 劳动需求基准)
 
     # ── 财务 ──

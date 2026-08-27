@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 ✅ / Week A ✅ / Week B ✅ / **Week C M1+M2 ✅ (BH 股市 + 组合选择 + 波动聚集校准)**
+> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 ✅ / **Week A+B+C 全部完成 ✅** (下一站: Week D 投行+资管)
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,18 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 279 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+**测试基线**: 291 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+
+### Phase 3 Week C 里程碑 3: 交叉持股骨架（2026-08-27 完成）— Week C 收官
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **C-M3a BA 持股图** | ✅ | `network/cross_holdings.py`: 发行人按累计度数加权抽 m_links 个持有人, 划出 β=20% 股数; 无自持 |
+| **C-M3b 双科目记账** | ✅ | FirmBalanceSheet 新增 `stocks`(持有市值) ↔ `minority_equity`(被持负债): 加总恒等 → 部门 NW 不虚增、无双重计算 |
+| **C-M3c 分红含企业股东** | ✅ | 总分红按持股切分家庭/企业两池; 企业股东收款镜像 `deposits_from_firms` |
+
+三层守恒实测: Σ互持==Σ被发; 家庭+企业互持==总供给; 双科目逐位相等.
+`enable_cross_holdings=False` 默认关闭; 经济效应通道 (fire-sale 传染) Week D 接入.
 
 ### Phase 3 Week C 里程碑 2: 组合选择 + 波动聚集校准（2026-08-27 完成）
 
@@ -44,8 +55,7 @@
 零 SFC 违反; 持仓守恒 = 总股数; Σhh.deposits 与银行镜像逐位一致;
 厚尾 kurtosis≥3; 同种子逐位复现; 快照 v4 roundtrip.
 
-**Week C 后续里程碑** (留待继续): 交叉持股骨架 (Scale-Free 图);
-i-bank/资管接入为股市对手方 (Week D).
+~~交叉持股骨架~~ → **M3 已完成**. Week C 全部交付.
 
 ### Phase 3 Week B: 劳动市场跨部门流动 + 失业深化（2026-08-27 完成）
 

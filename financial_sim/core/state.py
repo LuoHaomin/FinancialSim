@@ -121,6 +121,7 @@ class SimulationState:
 
     # ── Phase 3 Week C: 股票市场 ──
     stock_market: object | None = None     # markets.stocks.StockMarket
+    cross_holdings: dict[str, dict[str, float]] = field(default_factory=dict)
     last_month_dividends: float = 0.0      # 上月实发分红总额 (股息锚)
     housing_price_history: list[float] = field(default_factory=list)
     housing_expectations_factor: float = 1.0  # 房价泡沫因子 (>1 = 投机性溢价)
@@ -230,12 +231,30 @@ class SimulationState:
 
         housing_price = self.housing_market.price if self.housing_market else 0.0
         stock_price = getattr(self.stock_market, "price", 0.0) or 0.0
+        # M3: 交叉持股双科目估值 (持有=发行, 加总必然相等, NW 不变)
+        cross_hold_value = stock_price * sum(
+            sum(targets.values()) for targets in self.cross_holdings.values()
+        )
+        cross_issued_value = stock_price * sum(
+            f.shares_held_by_firms for f in self.firms
+        )
+        # 两口径理论上相等; 取均值消浮点尾差, 差值过大则说明守恒被破坏
+        if abs(cross_hold_value - cross_issued_value) > (
+            1e-6 * max(1.0, cross_hold_value)
+        ):
+            logger.warning(
+                f"Cross-holding conservation drift: held={cross_hold_value:.6f} "
+                f"issued={cross_issued_value:.6f}"
+            )
+        cross_val = (cross_hold_value + cross_issued_value) / 2.0
 
         return {
             "households": HouseholdBalanceSheet(
                 cash=self.total_household_cash(),
                 deposits=self.total_household_deposits(),
-                stocks=stock_price * sum(h.stock_units for h in self.households),
+                stocks=stock_price * sum(
+                    h.stock_units for h in self.households
+                ),
                 bonds=sum(h.bonds for h in self.households),
                 housing_self=housing_price * sum(
                     min(1, h.housing_units) for h in self.households
@@ -251,6 +270,16 @@ class SimulationState:
                 deposits=sum(f.deposits for f in self.firms),
                 inventories=sum(f.inventory for f in self.firms),
                 capital_stock=sum(f.capital for f in self.firms),
+                stocks=(
+                    cross_val
+                    if stock_price > 0 and self.cross_holdings
+                    else 0.0
+                ),
+                minority_equity=(
+                    cross_val
+                    if stock_price > 0 and self.cross_holdings
+                    else 0.0
+                ),
                 bank_loans=sum(f.debt for f in self.firms),
             ),
             "banks": CommercialBankBalanceSheet(

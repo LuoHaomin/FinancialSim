@@ -84,6 +84,7 @@ class StateSnapshot:
             "stock_market": (
                 _to_dict(state.stock_market) if state.stock_market else None
             ),
+            "cross_holdings": getattr(state, "cross_holdings", {}) or {},
             "bank": _to_dict(state.bank) if state.bank else None,
             "banks": [_to_dict(b) for b in state.banks],  # Phase 2: multi-bank
             "housing_market": (
@@ -148,6 +149,11 @@ class StateSnapshot:
             state.bank = _from_dict(  # type: ignore[arg-type]
                 payload["bank"], CommercialBank
             )
+        state.cross_holdings = payload.get("cross_holdings", {}) or {}
+        for f in state.firms:
+            f.shares_held_by_firms = float(sum(
+                tgt.get(f.id, 0.0) for tgt in state.cross_holdings.values()
+            ))
         if payload.get("stock_market"):
             from financial_sim.markets.stocks import StockMarket, Trader
             mkt_payload = dict(payload["stock_market"])
