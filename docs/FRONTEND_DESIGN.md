@@ -1,6 +1,10 @@
 # 前端设计方案（Phase 4：教学层）
 
-> 状态：设计定稿 v1（2026-08-27），实现计划见 [IMPLEMENTATION.md](../IMPLEMENTATION.md) §6
+> 状态：设计定稿 v1.1（2026-08-27），实现计划见 [IMPLEMENTATION.md](../IMPLEMENTATION.md) §6
+> **已决策**（用户拍板 2026-08-27）：
+> ① MVP 范围 = 实验模式的宏观看板+干预；教程课程延后；
+> ② 单机自用，不做服务器/观众席部署；
+> ③ 界面中文直出，i18n 不做键位。
 > 对应设计：[DESIGN.md](DESIGN.md) + [SIMULATION.md](SIMULATION.md) + 快照格式 snapshot v5
 
 ---
@@ -79,12 +83,12 @@
 - 供应链网络：节点=企业，边=IO 购买额，断供时下游节点闪烁灰化
 - 交叉持股：holder→issuer 有向图，边宽=持股价值（beta 图）；家庭部门作为单一外部大节点
 
-### 场景编辑器
+### 场景编辑器 ⏸（二期, MVP 外）
 - 表单 = `SimConfig.model_json_schema()` 自动生成 + 分组折叠
 - 冲击编排器：从 PRESET_SHOCKS 选择预设 × 设 trigger_t/duration/magnitude override，时间轴拖拽排序
 - "保存为 YAML"导出 scenarios/*.yaml 兼容格式
 
-### 教程课程（3 门）
+### 教程课程（3 门）⏸（延后, MVP 外）
 每课 = 固定 seed + 预置场景 + 分步干预脚本 + "预期现象清单"核对卡：
 1. 《通胀来了》：货币政策传导（加息→GDP 滞后回落→通胀收敛）
 2. 《金融危机》：housing_bust 场景下观察抵押违约→fire-sale→救助
@@ -180,4 +184,6 @@ tests/integration/test_ui_api.py   # FastAPI TestClient 冒烟 (不入 Playwrigh
 |---|---|---|
 | Q13 | 时序大批量走 JSON 还是 Arrow IPC？ | MVP 用 JSON；n=5000×50 年全量拉取实测 >500ms 再切 Arrow |
 | Q14 | 多仿真并存上限？ | 默认每进程 8 个 (内存换简单)；超限 LRU 淘汰并提示保存快照 |
-| Q15 | 前端是否需要中文双语？ | MVP 中文文案直出；i18n 键位留桩 |
+| Q15 | 前端是否需要中文双语？ | **已决**: 中文直出, 不留 i18n 桩 |
+| Q16 | 时间旅行 fork 对比是否进 MVP？ | 不进; 检查点机制先落地, fork 界面二期 |
+| Q17 | 场景编辑器进 MVP 吗? | 不进; MVP 用预设场景下拉+参数覆盖 JSON 即可 |
