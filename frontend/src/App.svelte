@@ -93,6 +93,13 @@
     </select>
     <button onclick={createSim} disabled={busy}>新建仿真</button>
     <span class="sep"></span>
+    {#if $simId}
+    <button class:active={view === 'dashboard'}
+            onclick={() => (view = 'dashboard')}>宏观</button>
+    <button class:active={view === 'agents'}
+            onclick={() => (view = 'agents')}>部门下钻</button>
+    <span class="sep"></span>
+    {/if}
     <button onclick={resume} disabled={!$simId}>▶ 继续</button>
     <button onclick={pause} disabled={!$simId}>⏸ 暂停</button>
     <button onclick={stepOnce} disabled={!$simId}>单步 +1</button>

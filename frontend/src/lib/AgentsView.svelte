@@ -3,13 +3,19 @@
   import { api, type FirmRow, type BankRow, type AssetLiabilityView } from './api'
   import { simId } from './stores'
 
-  let tab: 'firms' | 'banks' = 'firms'
-  let firms: FirmRow[] = []
-  let banks: BankRow[] = []
-  let detail: AssetLiabilityView | null = null
-  let error = ''
+  // ⚠️ 组件内有 runes 用法($derived/$effect)即进入 runes 模式:
+  // 所有响应式本地状态必须显式 $state
+  let tab = $state<'firms' | 'banks'>('firms')
+  let firms = $state<FirmRow[]>([])
+  let banks = $state<BankRow[]>([])
+  let detail = $state<AssetLiabilityView | null>(null)
+  let error = $state('')
+  const id = $derived($simId)
 
-  $: id = $simId
+  // 进入视图时自动拉一次
+  $effect(() => {
+    if ($simId) refresh()
+  })
 
   async function refresh() {
     if (!id) return
@@ -28,6 +34,7 @@
       detail = null; error = String(e)
     }
   }
+
 
   const fmt = (v: number | null | undefined) =>
     v === null || v === undefined ? '—'
