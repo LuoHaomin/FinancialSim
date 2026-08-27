@@ -356,6 +356,57 @@ def _bank_cycle(state: SimulationState) -> None:
 
 
 # ════════════════════════════════════════════════════════════
+# 6b. 银行分红 (Phase 3 稳态修复): 超额资本按比例分给家庭股东
+# ════════════════════════════════════════════════════════════
+def _bank_dividend_cycle(state: SimulationState) -> None:
+    """银行超额资本 → 家庭股东分红 (账面转移, 无现金流动).
+
+    之前 bank.capital 只能从贷款利息收入单调上升, 没有出口 → 稳态失衡.
+    Phase 3 修复: 当 CAR > bank_dividend_car_target 时, 把超额资本按
+    bank_dividend_payout 比例"以股票分红"形式分给家庭 — 资本直接转换为
+    HH 存款, 不涉及准备金/现金流动.
+
+    SFC 注记 (账面转移, 双重记账):
+      bank.capital ↓D
+      bank.deposits_from_hh ↑D       (HH 的存款负债增加 — 资本退出银行的
+                                     体现: 以前是 capital, 现在是 deposits)
+      h.deposits ↑D
+    净效果: bank.A 不变, bank.L ↑D, bank.cap ↓D → A = L + cap 保持 ✓.
+    """
+    if not bool(_cfg(state, "enable_bank_dividends", True)):
+        return
+    if state.bank is None:
+        return
+    bank = state.bank
+    payout_ratio = float(_cfg(state, "bank_dividend_payout", 0.6))
+    target_car = float(_cfg(state, "bank_dividend_car_target", 0.10))
+    total_dividend = 0.0
+    for b in state.banks:
+        car = b.car()
+        if car <= target_car or car == float("inf"):
+            continue
+        excess = b.capital - target_car * b.total_assets()
+        if excess <= 1e-9:
+            continue
+        payout = payout_ratio * excess
+        # 银行侧: capital 减, deposits_from_hh 增 (账面转移, 无现金流动)
+        b.capital -= payout
+        # 在聚合 BS 中: bank.deposits_from_hh += payout (下面统一加)
+        total_dividend += payout
+    if total_dividend <= 0:
+        return
+    # 把分红按 deposits 比例分给家庭
+    hh_total_dep = sum(h.deposits for h in state.households)
+    if hh_total_dep <= 0:
+        return
+    for h in state.households:
+        share = h.deposits / hh_total_dep
+        pay = share * total_dividend
+        h.deposits += pay
+    bank.deposits_from_hh += total_dividend  # L↑, 镜像 HH 存款增
+
+
+# ════════════════════════════════════════════════════════════
 # 7. 政府: 税收 + 支出 + 救济 + 赤字融资
 # ════════════════════════════════════════════════════════════
 def _government_cycle(state: SimulationState) -> None:
@@ -456,7 +507,7 @@ def _bond_cycle(state: SimulationState) -> None:
       C. 付息: 从 gov.treasury_deposits 按持有比例分配给持有人,
          对方存款增加.
     """
-    if not bool(_cfg(state, "enable_bond_market", True)):
+    if not bool(_cfg(state, "enable_bond_market", False)):
         return
     if state.government is None or state.central_bank is None:
         return

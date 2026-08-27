@@ -83,8 +83,6 @@ class SimConfig(BaseModel):
 
     # ── Household (消费行为) ──
     wealth_effect_coef: float = 0.0          # λ: 超额财富拉动消费
-                                             # 默认关闭: 纯存款型财富会直接转化为
-                                             # 商品需求推高通胀; 引入资产市场后开启
     unemployment_replacement_rate: float = 0.4  # 救济替代率上限参考
 
     # ── Heterogeneity (初始化分布) ──

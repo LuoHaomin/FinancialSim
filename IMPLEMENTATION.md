@@ -99,7 +99,7 @@ Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、�
 - 国债利息默认滚入本金（CB 利润上缴未建模）→ 前置批次 P0-b 部分处理, 剩余项留 Phase 5
 - 存款利率为单一聚合利率（无个体层级差异化）→ Phase 3 Week A 多主体化自然消解
 - **多银行同业敞口初始化挂起**: 临时禁用, 留给 Phase 3 Week E 重新设计主银行语义
-- **Baseline 不稳态**: G/T 比例失衡 → 政策利率贴 floor, gov debt 线性发散. Phase 3 Week A 同步修复 (G 实物化为商品需求 + 财富效应 + 银行分红出口).
+- **Baseline 不稳态 (2026-08-27 尝试未根治)**: G/T 比例失衡 + 价格离散规则 (5%/月硬阶) + 单一企业生产函数不响应价格 → 政策利率贴 floor 或被发散通胀推到 100%+. 已在 `_bank_dividend_cycle` / 财富效应参数上做出工具脚手架, 但完整稳态需 Phase 3 Week A 重新校准生产函数 (`CES 多部门` 才能让生产响应价格). 详见下方 "稳态修复尝试" 章节.
 
 ---
 
@@ -227,6 +227,30 @@ Phase 3 新增模块落点见 §5 各周计划。
 > Phase 0-2 已完成（199 测试全绿，危机涌现验证通过），
 > 现有资产：housing/mortgage、多银行(主银行语义)、同业敞口(静态)、事件系统、快照 v2、校准套件雏形。
 > 编排原则沿用 §1：SFC 优先——每个模块开工前先写死"双边记账规格"，负向测试随代码提交。
+
+### 4.1 稳态修复尝试（2026-08-27, 未根治, 仅作工具脚手架）
+
+**问题诊断** (120 月 baseline 跑):
+- 政策利率被通胀推至 100%+ 或贴 floor (−0.005)
+- gov debt 线性发散
+- 失业率 (1-2%) ≪ NAIRU (5%) — 失业机制弱
+- 校准套件 7 项 stylized facts 中 6 项 "pseudo-passing" (断言被放宽到任意常数 / xfail / skip)
+
+**根因**: 不是单一 bug, 而是三个相互放大的结构性缺陷:
+1. **生产函数不响应价格**: `production = productivity × employees` 与价格脱钩 → 库存耗尽时无法扩产 → 价格阶梯 (5%/月) 单调上升
+2. **价格规则离散且无上界**: 库存耗尽时按 5% 步长提价, 累计 11 个月到 71% YoY; Taylor rule 又以更高利率反击 → 恶性循环
+3. **财政失衡 (G = 0.45 × potential_gdp, T ≈ 0.25 × wage_bill)**: 18% 永久赤字 → CB 货币化 → 银行资本单调增长 → 没有退出阀
+
+**修复尝试与产出**:
+- ✅ 工具脚手架: `_bank_dividend_cycle(state)` 在 `step.py` 中定义 (账面转移: `bank.capital ↓D ↔ bank.deposits_from_hh ↑D ↔ h.deposits ↑D`), SFC 平衡已验证, 后续 Phase 3 Week A 调通生产函数后只需 `monthly_tick` 中插入一行调用即可开启
+- ✅ 工具脚手架: `config.wealth_effect_coef` 默认 0, 留作 Phase 3 调参用
+- ⚠️ `_government_cycle` 中 G 实物化的尝试 (按当前价格扣 `firm.inventory`) 在调用顺序上无法闭环 (G 在 `_household_consumption` 之后跑), 单方面改进会破坏其他机制 (已撤回)
+- ❌ 完整稳态无法仅通过调参实现 — 必须重写生产函数 + 价格规则 (Phase 3 Week A 范畴)
+
+**承诺给 Phase 3 Week A 的接入点**:
+1. `_bank_dividend_cycle(state)` 已 ready, 一行插入 `monthly_tick` 即可激活
+2. `enable_bank_dividends=True` 已为默认, `bank_dividend_car_target=0.10` 已调
+3. `_bond_cycle` 默认 OFF 的 bug 已修 (原本即使 config flag 为 False, 函数内默认参数也会让它运行 — 已统一为 False)
 
 ### 5.0 前置批次：P1/P2 遗留 + 记账债务清偿（约 2 周，Phase 3 Week A 前必须完成）
 
