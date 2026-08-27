@@ -9,30 +9,44 @@ Phase 0 简化版 (按 docs/SIMULATION.md 8.2 简化):
 from __future__ import annotations
 
 from financial_sim.core.state import SimulationState
+from financial_sim.markets.goods import GoodsMarket
+from financial_sim.markets.labor import LaborMarket
 from financial_sim.monetary.sfc import validate_sfc
 from financial_sim.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-def monthly_tick(state: SimulationState) -> None:
+def monthly_tick(
+    state: SimulationState,
+    goods_market: GoodsMarket | None = None,
+    labor_market: LaborMarket | None = None,
+) -> None:
     """执行一个月的仿真.
 
     阶段 (Phase 0 简化):
     1. CB 决策 (Taylor Rule)
-    2. Firm 决策 (生产, 雇佣)
-    3. Firm 支付工资 (HH.deposits 增加)
-    4. Household 消费决策 + 购买
-    5. Government 税收 + 支出 (平衡预算)
-    6. 宏观聚合
-    7. SFC 校验
+    2. 劳动市场出清 (雇佣 + 工资调整)
+    3. 工资支付 (firm → HH)
+    4. HH 消费 (HH → firm)
+    5. 商品市场出清 (价格调整 + 库存更新)
+    6. Government (Phase 0 关闭)
+    7. 宏观聚合
+    8. SFC 校验
     """
+    if goods_market is None:
+        goods_market = GoodsMarket()
+    if labor_market is None:
+        labor_market = LaborMarket()
+
     logger.debug(f"=== Tick {state.t} start ===")
 
     _cb_decisions(state)
-    _firm_decisions(state)
+    labor_market.clear(state)
     _pay_wages(state)
     _household_consumption(state)
+    goods_market.clear(state)
+    goods_market.update_inventory(state)
     _government_cycle(state)
     _aggregate_macros(state)
     _validate_sfc(state)
@@ -53,22 +67,6 @@ def _cb_decisions(state: SimulationState) -> None:
         smoothing=0.85,  # 惯性
     )
     cb.policy_rate = new_rate
-
-
-# ════════════════════════════════════════════════════════════
-# Phase 2: Firm 决策
-# ════════════════════════════════════════════════════════════
-def _firm_decisions(state: SimulationState) -> None:
-    """Phase 0: Firm 雇佣所有失业者, 维持生产."""
-    firm = state.firm
-    assert firm is not None
-
-    # Phase 0: 雇佣所有失业家庭 (full employment)
-    # Phase 1: 根据预期需求 + 产能利用率
-    unemployed = [h for h in state.households if not h.employed]
-    for h in unemployed:
-        firm.hire(1)
-        h.find_job(sector=firm.sector, wage=firm.wage_offered)
 
 
 # ════════════════════════════════════════════════════════════
