@@ -42,6 +42,15 @@ class LaborMarket:
     wage_adjust_freq: int = 6             # 工资调整频率(月)
     wage_phillips_coeff: float = WAGE_PRESSURE_COEFF
 
+    # ── Phase 3 Week B: 动态劳动需求 + 疤痕效应 ──
+    adjust_up_speed: float = 0.25         # 每月最大扩员比例
+    adjust_down_speed: float = 0.35       # 每月最大裁员比例 (向下更快)
+    inventory_buffer: float = 0.20        # 目标产量相对销量缓冲
+    demand_response_delay: int = 1        # 雇佣决策对销售的滞后 (月)
+    scar_discount_rate: float = 0.01      # 长期失业: 每超宽限月工资折扣
+    scar_grace_months: int = 6            # 疤痕宽限期
+    scar_discount_cap: float = 0.30       # 折扣封顶
+
     def configure(
         self,
         full_employment: bool | None = None,
@@ -49,6 +58,13 @@ class LaborMarket:
         matching_efficiency: float | None = None,
         wage_adjust_freq: int | None = None,
         wage_phillips_coeff: float | None = None,
+        adjust_up_speed: float | None = None,
+        adjust_down_speed: float | None = None,
+        inventory_buffer: float | None = None,
+        demand_response_delay: int | None = None,
+        scar_discount_rate: float | None = None,
+        scar_grace_months: int | None = None,
+        scar_discount_cap: float | None = None,
     ) -> None:
         """运行时覆盖参数 (允许 config 与实例共存)."""
         if full_employment is not None:
@@ -61,6 +77,20 @@ class LaborMarket:
             self.wage_adjust_freq = wage_adjust_freq
         if wage_phillips_coeff is not None:
             self.wage_phillips_coeff = wage_phillips_coeff
+        if adjust_up_speed is not None:
+            self.adjust_up_speed = adjust_up_speed
+        if adjust_down_speed is not None:
+            self.adjust_down_speed = adjust_down_speed
+        if inventory_buffer is not None:
+            self.inventory_buffer = inventory_buffer
+        if demand_response_delay is not None:
+            self.demand_response_delay = max(0, int(demand_response_delay))
+        if scar_discount_rate is not None:
+            self.scar_discount_rate = scar_discount_rate
+        if scar_grace_months is not None:
+            self.scar_grace_months = scar_grace_months
+        if scar_discount_cap is not None:
+            self.scar_discount_cap = scar_discount_cap
 
     @classmethod
     def from_config(cls, config) -> LaborMarket:
@@ -72,6 +102,15 @@ class LaborMarket:
             matching_efficiency=getattr(config, "labor_matching_efficiency", None),
             wage_adjust_freq=getattr(config, "labor_wage_adjust_freq", None),
             wage_phillips_coeff=getattr(config, "labor_wage_phillips_coeff", None),
+            adjust_up_speed=getattr(config, "labor_adjust_up_speed", None),
+            adjust_down_speed=getattr(config, "labor_adjust_down_speed", None),
+            inventory_buffer=getattr(config, "labor_inventory_buffer", None),
+            demand_response_delay=getattr(
+                config, "labor_demand_response_delay", None
+            ),
+            scar_discount_rate=getattr(config, "wage_scar_discount_rate", None),
+            scar_grace_months=getattr(config, "wage_scar_grace_months", None),
+            scar_discount_cap=getattr(config, "wage_scar_discount_cap", None),
         )
         return market
 
@@ -93,6 +132,9 @@ class LaborMarket:
         if not state.firms:
             return
 
+        # 0. 动态劳动需求: 销售驱动更新目标就业 + 收缩部门裁员入池
+        self._update_labor_demand(state)
+
         # 1. 外生离职
         self._apply_separations(state)
 
@@ -109,6 +151,57 @@ class LaborMarket:
         # 4. 失业计时推进
         for h in state.households:
             h.tick_unemployment()
+
+    # ════════════════════════════════════════════════════════════
+    # 0. 动态劳动需求 (Week B): 销售 → 目标产量 → 目标就业 → 裁员
+    # ════════════════════════════════════════════════════════════
+    def _update_labor_demand(self, state: SimulationState) -> None:
+        """各企业的目标就业由 (滞后的) 销售额决定, 调整速度上下不对称.
+
+        L* = 滞后销量 ×(1+库存缓冲) / (A × P)   (线性生产下的保本就业)
+        调整: desired = L + clamp(L* − L, −down·L, +up·L)
+        目标下调部分立即裁员 (员工进入失业池, 等待匹配再配置).
+        """
+        for firm in state.firms:
+            if firm.is_bankrupt:
+                continue
+            hist = getattr(firm, "demand_history", None)
+            if not hist:
+                # 无需求历史时退回销售历史, 再退回当月销售额
+                hist = getattr(firm, "sales_history", None)
+                base_val = getattr(firm, "last_sales", 0.0)
+            else:
+                base_val = 0.0
+            if hist:
+                idx = len(hist) - 1 - self.demand_response_delay
+                delayed_sales = hist[idx] if idx >= 0 else hist[0]
+            else:
+                delayed_sales = base_val
+
+            if delayed_sales <= 0 or firm.price <= 0 or firm.productivity <= 0:
+                target_l = float(firm.employees)  # 无销售信号: 维持现状
+            else:
+                target_output = delayed_sales * (1.0 + self.inventory_buffer)
+                target_l = (
+                    target_output / firm.price / firm.productivity
+                )
+
+            lo = firm.employees - self.adjust_down_speed * firm.employees
+            hi = firm.employees + self.adjust_up_speed * firm.employees
+            desired = int(round(min(max(target_l, lo), hi)))
+            desired = max(desired, 0)
+            firm.baseline_employees = desired
+
+            # 立即裁掉超出目标的部分 (裁员快于招聘的不对称性)
+            excess = firm.employees - desired
+            if excess > 0:
+                staff = [
+                    h for h in state.households
+                    if h.employed and h.employer_id == firm.id
+                ]
+                for h in staff[:excess]:
+                    h.lose_job()
+                firm.fire(excess)
 
     # ════════════════════════════════════════════════════════════
     # 1. 外生离职
@@ -211,9 +304,10 @@ class LaborMarket:
                 h = next(hire_iter, None)
                 if h is None:
                     break
+                effective_wage = self._scar_discounted_wage(firm.wage_offered, h)
                 firm.hire(1)
                 h.find_job(
-                    sector=firm.sector, wage=firm.wage_offered,
+                    sector=firm.sector, wage=effective_wage,
                     employer_id=firm.id,
                 )
                 hired_total += 1
@@ -222,6 +316,20 @@ class LaborMarket:
             f"  labor: V={total_vacancies}, U={n_unemployed}, "
             f"θ={theta:.2f}, f={f_match:.2f}, hires={hired_total}"
         )
+
+    # ════════════════════════════════════════════════════════════
+    # 疤痕效应 (Week B): 长期失业者再就业时接受工资折扣
+    # ════════════════════════════════════════════════════════════
+    def _scar_discounted_wage(
+        self, posted_wage: float, household: object,
+    ) -> float:
+        """w_eff = w × (1 − min(cap, rate × max(0, 失业月数 − 宽限期)))."""
+        dur = getattr(household, "unemployment_duration", 0)
+        over = max(0, dur - self.scar_grace_months)
+        discount = min(
+            self.scar_discount_cap, self.scar_discount_rate * over
+        )
+        return posted_wage * (1.0 - discount)
 
     # ════════════════════════════════════════════════════════════
     # 3. 工资调整

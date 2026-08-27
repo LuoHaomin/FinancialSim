@@ -162,45 +162,75 @@ class TestCrisisEmergence:
 # Test 5: GDP-就业协动
 # ════════════════════════════════════════════════════════════
 class TestGDPEmploymentCoMovement:
-    def test_gdp_employment_correlation_positive(self, baseline_run):
+    def test_gdp_employment_correlation_positive(self):
         """GDP 与就业应正相关 (用 unemployment_rate 代理就业变化).
 
-        用 12 月同比变化率. Phase 1 简化下放宽到 >0.5 (理想 0.7).
+        Week B 后 baseline 是无波动的完美稳态 (u≡0, 方差 0, 相关性无定义),
+        奥肯定律因此在财政紧缩场景中检验: 冲击压缩 G → 需求/就业/GDP 同向
+        回落 → 恢复期同向回升.
         """
-        sim = baseline_run
-        history = sim.state.macro_history
-        if len(history) < 24:
-            pytest.skip("Need ≥24 months of history")
+        from financial_sim.config import SimConfig
+        from financial_sim.core import Simulation
+        from financial_sim.simulation.events import (
+            EventManager,
+            make_preset_shock,
+        )
+
+        # 45% 深度紧缩 (0.55 缩减): 温和紧缩只削超额需求, 不产生周期性失业
+        em = EventManager([
+            make_preset_shock(
+                "fiscal_austerity_30p_12m", trigger_t=12,
+                override={"magnitude": 0.45},
+            ),
+            make_preset_shock(
+                "fiscal_austerity_30p_12m", trigger_t=48,
+                override={"magnitude": 0.45},
+            ),
+        ])
+        config = SimConfig(n_households=200, n_ticks=84, seed=42)
+        sim = Simulation(config, scenario_events=em)
+        history = sim.run(84).macro_history
 
         gdp = np.array([s.real_gdp for s in history])
-        # MacroSnapshot 没有 total_employed 字段, 用 unemployment 反推
-        # employment ~ (1 - unemployment)
         unemp = np.array([s.unemployment_rate for s in history])
         emp_proxy = 1.0 - unemp
 
-        if gdp[-12] == 0:
-            pytest.skip("Zero base")
+        if np.std(gdp) < 1e-9 or np.std(emp_proxy) < 1e-9:
+            pytest.skip("No variation (steady state) — correlation undefined")
 
-        gdp_g = gdp[12:] / gdp[:-12] - 1
-        emp_g = emp_proxy[12:] - emp_proxy[:-12]  # level change
-
-        if len(gdp_g) < 6:
-            pytest.skip("Need ≥6 12-month diffs")
-
-        corr = np.corrcoef(gdp_g, emp_g)[0, 1]
+        corr = np.corrcoef(gdp, emp_proxy)[0, 1]
         assert corr > 0.3, f"GDP-employment corr = {corr:.3f} (expected >0.3)"
 
-    def test_unemployment_inversely_correlated_with_gdp(self, baseline_run):
-        """失业率应与 GDP 负相关 (奥肯定律)."""
-        sim = baseline_run
-        history = sim.state.macro_history
+    def test_unemployment_inversely_correlated_with_gdp(self):
+        """失业率应与 GDP 负相关 (奥肯定律), 在紧缩冲击场景中检验."""
+        from financial_sim.config import SimConfig
+        from financial_sim.core import Simulation
+        from financial_sim.simulation.events import (
+            EventManager,
+            make_preset_shock,
+        )
+
+        # 45% 深度紧缩 (0.55 缩减): 温和紧缩只削超额需求, 不产生周期性失业
+        em = EventManager([
+            make_preset_shock(
+                "fiscal_austerity_30p_12m", trigger_t=12,
+                override={"magnitude": 0.45},
+            ),
+            make_preset_shock(
+                "fiscal_austerity_30p_12m", trigger_t=48,
+                override={"magnitude": 0.45},
+            ),
+        ])
+        config = SimConfig(n_households=200, n_ticks=84, seed=42)
+        sim = Simulation(config, scenario_events=em)
+        history = sim.run(84).macro_history
         gdp = np.array([s.real_gdp for s in history])
         unemp = np.array([s.unemployment_rate for s in history])
-        if len(gdp) < 12:
-            pytest.skip("Need ≥12 months")
+        if np.std(gdp) < 1e-9 or np.std(unemp) < 1e-9:
+            pytest.skip("No variation (steady state) — correlation undefined")
 
         corr = np.corrcoef(gdp, unemp)[0, 1]
-        assert corr < 0, f"GDP-unemployment corr = {corr:.3f} (expected <0)"
+        assert corr < -0.3, f"GDP-unemployment corr = {corr:.3f} (expected <-0.3)"
 
 
 # ════════════════════════════════════════════════════════════

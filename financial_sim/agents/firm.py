@@ -34,6 +34,9 @@ class Firm:
     sigma_elasticity: float = 0.5         # 替代弹性 σ (ρ = 1 − 1/σ; σ=1 → Cobb-Douglas)
     alpha_capital: float = 0.3            # 资本份额 α (劳动份额 1−α)
     last_sales: float = 0.0               # 上月实际销售额 (定价/库存基准, step 层写入)
+    last_demand: float = 0.0              # 上月总需求意向 (含库存不足未成交部分)
+    sales_history: list[float] | None = None  # 销售额历史 (Week B 劳动需求基准)
+    demand_history: list[float] | None = None  # 需求意向历史 (Week B 劳动需求基准)
 
     # ── 财务 ──
     cash: float = 0.0

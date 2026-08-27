@@ -50,7 +50,8 @@ def monthly_tick(
     _cb_decisions(state)
     labor_market.clear(state)
     for f in state.firms:
-        f.last_sales = 0.0  # 本月销售额清零 (消费 + 投资采购写入)
+        f.last_sales = 0.0
+        f.last_demand = 0.0  # 本月需求意向清零 (消费 + 政府 G 写入)
     _pay_wages(state)
     _consumer_credit_cycle(state)         # Phase 3 前置 P0-a: 消费贷申请 + 配给 + 还款
     _household_consumption(state)
@@ -62,12 +63,21 @@ def monthly_tick(
     _housing_cycle(state)                 # Phase 2: 抵押 + 房租 + 价格
     _government_cycle(state)
     _bond_cycle(state)                    # Phase 3 前置 P0-b: 发债 + 付息
+    _firm_dividend_cycle(state)           # Week B: 企业现金 → 家庭股东
     _firm_capital_cycle(state)
     _default_resolution(state)            # Phase 1+: 违约检测 + 处置 + 恢复
     _mortgage_default_check(state)        # Phase 2: 房贷违约 → 银行 NPL
     _interbank_cycle(state)               # Phase 2: 同业利息 (n_banks>1 时生效)
     _fire_sale_and_failure(state)         # Phase 2: fire-sale + 失败处置
     _aggregate_macros(state)
+    # Week B: 销售/需求历史入档 (劳动需求决策的滞后输入; 保留 13 个月窗口)
+    for f in state.firms:
+        sh = list(f.sales_history) if f.sales_history is not None else []
+        sh.append(f.last_sales)
+        f.sales_history = sh[-13:]
+        dh = list(f.demand_history) if f.demand_history is not None else []
+        dh.append(f.last_demand)
+        f.demand_history = dh[-13:]
     _validate_sfc(state)
 
     state.t += 1
@@ -298,7 +308,12 @@ def _distribute_to_firms(
 
 
 def _household_consumption(state: SimulationState) -> None:
-    """HH 决定消费, 受流动性约束; 消费按需求份额流向各部门企业."""
+    """HH 决定消费; 各部门按份额承接需求, 受库存约束限量成交.
+
+    Week B 微观修正: 库存不足时**不成交的部分退回家中存款**
+    (此前是"没货也收钱"的幻影购买). 未成交需求记入 firm.last_demand,
+    作为劳动市场扩张的信号 — 否则"少雇人→供给不足→销售萎缩"死循环.
+    """
     bank = state.bank
     assert bank is not None
 
@@ -309,22 +324,35 @@ def _household_consumption(state: SimulationState) -> None:
         else {}
     )
 
-    total_consumption = 0.0
+    total_intent = 0.0
     for h in state.households:
         c = min(h.decide_consumption(), h.deposits)
         c = max(c, 0.0)
-        h.deposits -= c
-        total_consumption += c
+        h.deposits -= c          # 先全额扣款
+        total_intent += c
 
-    if total_consumption > 0:
-        alloc = _distribute_to_firms(state, total_consumption, shares)
-        for f, v in alloc:
-            f.deposits += v
-            f.inventory = max(0.0, f.inventory - v)   # 实物出库
-            f.last_sales += v                          # 实际销售额 (定价基准)
-        bank.deposits_from_hh -= total_consumption
-        bank.deposits_from_firms += total_consumption
-    state.last_month_sales = total_consumption
+    paid_total = 0.0
+    if total_intent > 0:
+        for f, req in _distribute_to_firms(state, total_intent, shares):
+            served = min(req, f.inventory)     # 受真实库存约束
+            f.deposits += served
+            f.inventory = max(0.0, f.inventory - served)
+            f.last_sales += served
+            f.last_demand += req               # 需求意向全额记录
+            paid_total += served
+        # 未成交部分退款 (按户均摊, 残差给最后一户)
+        refund = total_intent - paid_total
+        if refund > 1e-9:
+            n = len(state.households)
+            distributed = 0.0
+            for i, h in enumerate(state.households):
+                pay = refund / n if i < n - 1 else refund - distributed
+                h.deposits += pay
+                distributed += pay
+            bank.deposits_from_hh += refund
+        bank.deposits_from_hh -= total_intent
+        bank.deposits_from_firms += paid_total
+    state.last_month_sales = paid_total
 
 
 # ════════════════════════════════════════════════════════════
@@ -532,10 +560,21 @@ def _government_cycle(state: SimulationState) -> None:
             h.income = per_hh
         bank.deposits_from_hh += total_benefits
     if g_spending > 0:
-        alloc = _distribute_to_firms(state, g_spending, shares)
-        for f, v in alloc:
-            f.deposits += v
-        bank.deposits_from_firms += g_spending
+        # Week B: 政府购买改为真实市场采购 — 抽库存 + 计入企业销售额.
+        # 此前 G 是"凭空注资" (只加存款不扣库存), 需求基数因此缺失 G 的
+        # 一块, 动态劳动需求会让就业自我塌缩 (实测单部门 24 月失业 85%).
+        # 库存不足时按可成交量收账 (未成交部分政府不付款).
+        served_total = 0.0
+        for f, req in _distribute_to_firms(state, g_spending, shares):
+            served = min(req, f.inventory)
+            f.deposits += served
+            f.inventory = max(0.0, f.inventory - served)
+            f.last_sales += served
+            f.last_demand += req
+            served_total += served
+        bank.deposits_from_firms += served_total
+        # 赤字融资只覆盖实际支出
+        g_spending = served_total
 
     gov.transfers = total_benefits
     gov.gov_spending = g_spending
@@ -703,6 +742,63 @@ def _find_household(state: SimulationState, hid: str):
         if h.id == hid:
             return h
     return None
+
+
+# ════════════════════════════════════════════════════════════
+# 7c. 企业分红 (Week B): 盈利部门囤积的现金回流家庭股东
+# ════════════════════════════════════════════════════════════
+def _firm_dividend_cycle(state: SimulationState) -> None:
+    """超过"2 个月工资单"缓冲的企业现金, 按 payout 比例分给家庭.
+
+    经济含义: 家庭是企业部门的最终所有者. 若无此出口, 需求份额占优的
+    部门会无限囤积购买力 → 总需求塌缩 → 结构性失业 (实测多部门 u≈25%).
+
+    记账 (银行负债科目间转移, 总量不变):
+      firm.deposits ↓D / bank.deposits_from_firms ↓D
+      h.deposits   ↑D / bank.deposits_from_hh   ↑D     (Σpay 逐位一致)
+    """
+    if not bool(_cfg(state, "enable_firm_dividends", True)):
+        return
+    bank = state.bank
+    if bank is None or not state.firms:
+        return
+    payout_ratio = float(_cfg(state, "firm_dividend_payout", 0.40))
+
+    total_div = 0.0
+    allocs: list[tuple[object, float]] = []
+    for f in state.firms:
+        buffer = 2.0 * f.employees * f.wage_offered
+        excess = max(0.0, f.deposits - buffer)
+        div = min(payout_ratio * excess, f.deposits)
+        if div <= 1e-9:
+            continue
+        allocs.append((f, div))
+        total_div += div
+    if total_div <= 0:
+        return
+
+    # 家庭按存款比例分配 (与 _bank_dividend_cycle 同口径), 残差给最后一家
+    hh_total_dep = sum(h.deposits for h in state.households)
+    if hh_total_dep <= 0:
+        return
+    distributed = 0.0
+    eligible = state.households
+    for i, h in enumerate(eligible):
+        pay = (
+            total_div * h.deposits / hh_total_dep
+            if i < len(eligible) - 1
+            else total_div - distributed
+        )
+        h.deposits += pay
+        distributed += pay
+
+    paid = 0.0
+    for i, (f, div) in enumerate(allocs):
+        deduct = div if i < len(allocs) - 1 else (total_div - paid)
+        f.deposits -= deduct
+        paid += deduct
+    bank.deposits_from_firms -= total_div
+    bank.deposits_from_hh += total_div
 
 
 # ════════════════════════════════════════════════════════════

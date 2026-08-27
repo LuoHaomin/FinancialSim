@@ -16,20 +16,23 @@ from pydantic import BaseModel, Field
 # ════════════════════════════════════════════════════════════
 # labor_share: 劳动力配置比例 (全部门归一化到 1)
 # demand_share: 消费/政府支出的需求流向比例 (资本品部门排除在外, 由投资驱动;
-#               在非资本品部门间归一化)
+#               在非资本品部门间归一化).
+# ⚠️ Week B 校准: demand_share 必须与劳动份额大体成比例 — 若某部门
+# demand/labor 比长期 <1, 工资成本吃掉全部收入 → 结构性亏损 → 破产级联
+# (实测: energy 5%/10% 时两个月内员工全灭). 非.自洽的份额只该用于压力测试.
 # productivity: 全要素生产率 A; price: 初始价格
 SECTOR_DEFAULTS: dict[str, dict[str, float]] = {
-    "consumer_goods": {"labor_share": 0.40, "demand_share": 0.55,
+    "consumer_goods": {"labor_share": 0.40, "demand_share": 0.40,
                        "productivity": 1.0, "price": 1.0},
     "capital":        {"labor_share": 0.10, "demand_share": 0.00,
                        "productivity": 1.0, "price": 1.0},
-    "energy":         {"labor_share": 0.10, "demand_share": 0.05,
+    "energy":         {"labor_share": 0.10, "demand_share": 0.11,
                        "productivity": 1.0, "price": 1.0},
-    "housing_services": {"labor_share": 0.15, "demand_share": 0.10,
+    "housing_services": {"labor_share": 0.15, "demand_share": 0.17,
                          "productivity": 1.0, "price": 1.0},
-    "high_tech":      {"labor_share": 0.10, "demand_share": 0.10,
+    "high_tech":      {"labor_share": 0.10, "demand_share": 0.09,
                        "productivity": 1.2, "price": 1.0},
-    "services":       {"labor_share": 0.15, "demand_share": 0.20,
+    "services":       {"labor_share": 0.15, "demand_share": 0.17,
                        "productivity": 1.0, "price": 1.0},
 }
 CAPITAL_GOODS_SECTORS = ("capital",)
@@ -159,6 +162,19 @@ class SimConfig(BaseModel):
     labor_matching_efficiency: float = 0.5  # 匹配效率: f = 1 - exp(-η·V/U)
     labor_wage_adjust_freq: int = 6       # 工资调整频率(月)
     labor_wage_phillips_coeff: float = 0.10  # κ: 失业缺口→工资(年率)
+
+    # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
+    enable_firm_dividends: bool = True
+    firm_dividend_payout: float = 0.40        # 每月对"工资单倍数以上"现金的分红比例
+
+    # ── Labor market (Phase 3 Week B: 动态劳动需求 + 疤痕效应) ──
+    labor_adjust_up_speed: float = 0.25     # 每月最多扩员比例 (销售驱动招聘上限)
+    labor_adjust_down_speed: float = 0.35   # 每月最多裁员比例 (向下更快)
+    labor_inventory_buffer: float = 0.20    # 目标产量 = 销量 × (1+库存缓冲)
+    labor_demand_response_delay: int = 1    # 雇佣决策对销售的滞后 (月, ≥0; 0=当月)
+    wage_scar_discount_rate: float = 0.01   # 长期失业疤痕: 每超宽限月折扣
+    wage_scar_grace_months: int = 6         # 宽限期: 失业 ≤ N 月不受折扣
+    wage_scar_discount_cap: float = 0.30    # 折扣封顶
 
     # ── Default & Bankruptcy (Phase 1+ 简化违约) ──
     enable_default: bool = True           # 启用企业违约检测
