@@ -1,6 +1,8 @@
 """Tests for GoodsMarket (Phase 0 simplified)."""
 from __future__ import annotations
 
+import math
+
 from financial_sim.config import SimConfig
 from financial_sim.core import Simulation
 from financial_sim.markets.goods import GoodsMarket
@@ -76,7 +78,16 @@ class TestGoodsMarketInventory:
         market = GoodsMarket()
         market.clear(sim.state)
 
-        assert abs(firm.price - initial_price) < 1e-9
+        # 校准 2026-08: 中性库存区间不再是"价格冻结", 而是以小步长
+        # (DRIFT_PULL=2%) 向成本加成锚收敛. 断言移动有界且方向正确.
+        anchor = (1.0 + GoodsMarket.MARKUP_TARGET) * (
+            firm.wage_offered / max(firm.productivity, 1e-9)
+        )
+        drift = firm.price - initial_price
+        assert abs(drift) <= market.DRIFT_PULL * abs(anchor - initial_price) + 1e-9
+        assert math.copysign(1, drift or 1) == math.copysign(
+            1, anchor - initial_price or 1
+        )
 
 
 class TestGoodsMarketInventoryUpdate:

@@ -165,11 +165,13 @@ class LaborMarket:
         for firm in state.firms:
             if firm.is_bankrupt:
                 continue
-            hist = getattr(firm, "demand_history", None)
+            # 以实际销售额为基准 (校准 2026-08): 需求意向在缺货退单时被
+            # 系统性高估 (实测虚高一倍), 用它定目标就业会让企业一边亏损
+            # 一边满负荷, 直至现金枯竭破产. 意向只作无销售时的回退.
+            hist = getattr(firm, "sales_history", None)
             if not hist:
-                # 无需求历史时退回销售历史, 再退回当月销售额
-                hist = getattr(firm, "sales_history", None)
-                base_val = getattr(firm, "last_sales", 0.0)
+                hist = getattr(firm, "demand_history", None)
+                base_val = getattr(firm, "last_demand", 0.0)
             else:
                 base_val = 0.0
             if hist:
@@ -347,7 +349,23 @@ class LaborMarket:
         unemployment_gap = self.NAIRU - unemployment  # >0 = 劳动力紧张
 
         exp_module = getattr(state, "inflation_expectation", None)
-        indexation = (exp_module.value / 2.0) if exp_module is not None else 0.0
+        # 校准 2026-08 量纲修正: 期望通胀是年率, 按调整频率摊销到单次.
+        # 此前的 /2 是"半年一半"的经验折减, 调整频率=6 时恰好年化两倍,
+        # 是实际工资长期爬升超过生产率的推手之一.
+        indexation = (
+            exp_module.value / float(self.wage_adjust_freq)
+            if exp_module is not None
+            else 0.0
+        )
+
+        # 生产率指数化: Δw/w 丿π_exp 外还含 TFP 趋势, 否则增长红利全部
+        # 归于利润端, 实际工资与劳动份额长期下滑 (校准 2026-08).
+        if state.config is not None and bool(
+            getattr(state.config, "labor_wage_productivity_indexation", True)
+        ):
+            indexation += float(
+                getattr(state.config, "productivity_growth_monthly", 0.0)
+            ) * self.wage_adjust_freq
 
         if unemployment_gap >= 0:
             pressure = indexation + self.wage_phillips_coeff * unemployment_gap

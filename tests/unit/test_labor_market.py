@@ -115,7 +115,10 @@ class TestLaborMarketWageAdjustment:
 
     def test_wage_demand_pull_inflation_indexed(self):
         """通胀预期 > 0 时, 工资应正向调整 (即使 unemployment 持平)."""
-        sim = Simulation(SimConfig(n_households=10, n_ticks=12))
+        sim = Simulation(SimConfig(
+            n_households=10, n_ticks=12,
+            labor_wage_productivity_indexation=False,
+        ))
         sim.state.inflation_expectation.value = 0.04  # 4% 预期
         market = LaborMarket()
         market.full_employment = True
@@ -125,16 +128,19 @@ class TestLaborMarketWageAdjustment:
         sim.state.t = 6
         initial_wage = sim.state.firm.wage_offered
         market.clear(sim.state)
-        # 4% 预期 × 0.5 (半年) = 2% 工资上涨
+        # 校准 2026-08 量纲修正: 年化预期按调整频率摊销 → 4%/6 ≈ 0.67%
         growth = sim.state.firm.wage_offered / initial_wage - 1
-        assert math.isclose(growth, 0.02, abs_tol=1e-6)
+        assert math.isclose(growth, 0.04 / 6, abs_tol=1e-6)
 
 
 class TestLaborMarketDownwardStickiness:
     """向下工资粘性: 失业>NAIRU 时降薪减半."""
 
     def test_demand_driven_downward_sticky(self):
-        sim = Simulation(SimConfig(n_households=10, n_ticks=12))
+        sim = Simulation(SimConfig(
+            n_households=10, n_ticks=12,
+            labor_wage_productivity_indexation=False,
+        ))
         # 制造失业率 70% (7/10). 把 baseline_employees 也降到 3
         # 否则 full_employment_hire 会把所有人雇回来, 失业被消除.
         for h in sim.state.households[:7]:
@@ -161,7 +167,10 @@ class TestLaborMarketDownwardStickiness:
 
     def test_downward_magnitude_halved(self):
         """粘性: 失业高时降薪幅度 = 非粘性时的 1/2."""
-        base_cfg = SimConfig(n_households=10, n_ticks=12)
+        base_cfg = SimConfig(
+            n_households=10, n_ticks=12,
+            labor_wage_productivity_indexation=False,
+        )
 
         # 非粘性版本 (coef 翻倍, 手动补偿)
         sim1 = Simulation(base_cfg)

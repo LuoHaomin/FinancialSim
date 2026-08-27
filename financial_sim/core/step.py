@@ -44,27 +44,43 @@ def monthly_tick(
     if goods_market is None:
         goods_market = GoodsMarket()
     if labor_market is None:
-        labor_market = LaborMarket()
+        # 校准 2026-08 重大修复: 此处此前的裸构造忽略 SimConfig 全部
+        # 劳动参数 (离职率/匹配效率/调整速度/工资频率...), 生产路径
+        # 实际运行的永远是类默认值 — from_config 只有测试在调用.
+        labor_market = LaborMarket.from_config(state.config)
 
     logger.debug(f"=== Tick {state.t} start ===")
 
     _apply_events(state)
     _cb_decisions(state)
+    # 生产率趋势增长 (月度复利): 无此通道时 real GDP 永久冻结, 经济退化为静态稳态.
+    prod_g = float(_cfg(state, "productivity_growth_monthly", 0.0))
+    if prod_g:
+        for f in state.firms:
+            if not f.is_bankrupt:
+                f.productivity *= 1.0 + prod_g
     labor_market.clear(state)
     for f in state.firms:
         f.last_sales = 0.0
         f.last_demand = 0.0  # 本月需求意向清零 (消费 + 政府 G 写入)
     _supply_chain_cycle(state)            # Week E-M1: IO 中间品采购 (默认关闭)
-    _pay_wages(state)
+    # 生产先于消费 (校准 2026-08): 本月产出必须先入库, 家庭/政府才有货可买.
+    # 此前消费在 update_inventory 之前执行, 月初货架 ≈ 上月末残余库存,
+    # 长期缺货配给 → 销售额被压低 → 劳动需求塌缩 (高失业陷阱).
+    goods_market.update_inventory(state)
     _consumer_credit_cycle(state)         # Phase 3 前置 P0-a: 消费贷申请 + 配给 + 还款
     _household_consumption(state)
-    goods_market.update_inventory(state)
-    goods_market.clear(state)  # 定价基于月末库存 (生产补充后)
+    goods_market.clear(state)  # 定价基于销售后的库存状态
     if _cfg(state, "calvo_price_prob", 0.0):
         _maybe_calvo_pricing(state, goods_market)
     _bank_cycle(state)
     _housing_cycle(state)                 # Phase 2: 抵押 + 房租 + 价格
     _government_cycle(state)
+    # 发薪在收入进账之后 (校准 2026-08): 此前工资先于全部货款支付,
+    # 企业月初现金恒 < 工资单 → 每月永久透支营运资本贷款, 本金永不
+    # 摊还 + 利息资本化 → 每 ~200 月技术性破产一次. 时序上等价于
+    # "月末发薪", 实际经济中企业以当月销售回款支付工资.
+    _pay_wages(state)
     _bond_cycle(state)                    # Phase 3 前置 P0-b: 发债 + 付息
     _firm_dividend_cycle(state)           # Week B: 企业现金 → 家庭股东
     _firm_capital_cycle(state)
@@ -92,7 +108,7 @@ def monthly_tick(
 
 
 # ════════════════════════════════════════════════════════════
-# 0. 事件系统: 在 CB 决策之前注入参数冲击
+# 1. 事件系统: 在 CB 决策之前注入参数冲击
 # ════════════════════════════════════════════════════════════
 def _apply_events(state: SimulationState) -> None:
     """从 EventManager 触发当前 tick 的所有 ShockEvent, 并记录日志."""
@@ -342,11 +358,15 @@ def _household_consumption(state: SimulationState) -> None:
     paid_total = 0.0
     if total_intent > 0:
         for f, req in _distribute_to_firms(state, total_intent, shares):
-            served = min(req, f.inventory)     # 受真实库存约束
+            # req 是金额意向; 库存是数量 → 按企业价格换算后受库存约束.
+            # 此前直接 min(req, inventory) 拿金额比数量, 价格偏离 1 时
+            # 双向失真 (低价多卖/高价少卖), 是基线通缩螺旋的源头之一.
+            units = min(req / max(f.price, 1e-9), f.inventory)
+            served = units * f.price
             f.deposits += served
-            f.inventory = max(0.0, f.inventory - served)
-            f.last_sales += served
-            f.last_demand += req               # 需求意向全额记录
+            f.inventory = max(0.0, f.inventory - units)
+            f.last_sales += served              # 销售额统一记金额
+            f.last_demand += req                # 需求意向全额记录 (金额)
             paid_total += served
         # 未成交部分退款 (按户均摊, 残差给最后一户)
         refund = total_intent - paid_total
@@ -419,6 +439,25 @@ def _bank_cycle(state: SimulationState) -> None:
             bank.loans_to_firms += loan_interest
             bank.book_loan_interest_income(loan_interest)
 
+    # ── 本金摊还 (校准 2026-08): 此前只付息不还本, 工资发放时点的
+    # 营运资本透支会永久累积并资本化利息, 净资产被慢性侵蚀 →
+    # 稳态运行 ~100 个月后技术性破产. 规则: 现金超过一个月工资单的
+    # 盈余按比例还本 (SFC: firm.deposits−R / debt−R / bank 两科目镜像).
+    repay_speed = float(_cfg(state, "firm_loan_repayment_speed", 0.30))
+    if repay_speed > 0:
+        for firm in state.firms:
+            if firm.is_bankrupt or firm.debt <= 1e-9:
+                continue
+            floor = firm.wage_offered * max(1, firm.employees)
+            surplus = firm.deposits - floor
+            repay = min(firm.debt, max(0.0, surplus) * repay_speed)
+            if repay <= 1e-9:
+                continue
+            firm.deposits -= repay
+            firm.debt = max(0.0, firm.debt - repay)
+            bank.loans_to_firms = max(0.0, bank.loans_to_firms - repay)
+            bank.deposits_from_firms -= repay
+
     # ── 存款利息 ──
     int_hh = bank.deposits_from_hh * deposit_rate / 12.0
     firm_dep_total = sum(f.deposits for f in state.firms)
@@ -433,6 +472,27 @@ def _bank_cycle(state: SimulationState) -> None:
             h.deposits += pay
             distributed += pay
         bank.deposits_from_hh += int_hh
+
+    # ── 央行准备金付息 (IOR, floor system; 校准 2026-08) ──
+    # 现实央行对商业银行准备金按政策利率付息. 此前缺失时, 银行的存款
+    # 负债端 (~70k) 只有微小贷款资产端 (~几 k) 提供利息收入, 政策利率一升,
+    # 银行资本被机械性放血 → 每 ~10 年一次非行为性的"窄银行危机".
+    # 记账 (SFC): 银行 reserves ↑I / capital ↑I (CB 承担付息, 不进镜像).
+    if bool(_cfg(state, "enable_interest_on_reserves", True)):
+        reserve_base = max(
+            0.0,
+            bank.deposits_from_hh + bank.deposits_from_firms
+            + getattr(bank, "deposits_from_nbfi", 0.0)
+            - bank.loans_to_firms - bank.loans_to_households,
+        )
+        ior_payment = reserve_base * float(cb.policy_rate) / 12.0
+        if ior_payment > 1e-9:
+            bank.reserves += ior_payment
+            bank.capital += ior_payment
+            # 央行镜像: 负债端创造准备金, 对应计为 CB 利息支出 (资本↓),
+            # 现实含义是央行上缴财政的利润减少.
+            cb.bank_reserves += ior_payment
+            cb.capital -= ior_payment
     if int_firm > 0 and firm_dep_total > 0:
         eligible_firms = [f for f in state.firms if f.deposits > 0]
         distributed = 0.0
@@ -574,10 +634,11 @@ def _government_cycle(state: SimulationState) -> None:
         # 库存不足时按可成交量收账 (未成交部分政府不付款).
         served_total = 0.0
         for f, req in _distribute_to_firms(state, g_spending, shares):
-            served = min(req, f.inventory)
+            units = min(req / max(f.price, 1e-9), f.inventory)  # 金额→数量
+            served = units * f.price
             f.deposits += served
-            f.inventory = max(0.0, f.inventory - served)
-            f.last_sales += served
+            f.inventory = max(0.0, f.inventory - units)
+            f.last_sales += served              # 金额口径 (与消费一致)
             f.last_demand += req
             served_total += served
         bank.deposits_from_firms += served_total
@@ -1514,7 +1575,8 @@ def _supply_chain_cycle(state: SimulationState) -> None:
         for sup in suppliers:
             if remaining <= 1e-9:
                 break
-            v = min(remaining, sup.inventory)
+            units = min(remaining / max(sup.price, 1e-9), sup.inventory)  # 金额→数量
+            v = units * sup.price
             if v <= 1e-9:
                 continue
             # ── 镜像记账 ──
@@ -1522,7 +1584,7 @@ def _supply_chain_cycle(state: SimulationState) -> None:
             bank.deposits_from_firms -= v
             sup.deposits += v
             bank.deposits_from_firms += v
-            sup.inventory = max(0.0, sup.inventory - v)
+            sup.inventory = max(0.0, sup.inventory - units)
             sup.last_sales += v
             received += v
             remaining -= v

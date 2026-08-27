@@ -115,6 +115,9 @@ class SimConfig(BaseModel):
     production_function: str = "linear"       # "linear" | "ces" (Week A)
     sigma_elasticity: float = 0.5             # CES 替代弹性 σ
     alpha_capital: float = 0.3                # CES 资本份额 α
+    productivity_growth_monthly: float = 0.0015   # 月度 TFP 增长 (~1.8%/年)
+    labor_wage_productivity_indexation: bool = True  # 工资方程是否指数化生产率趋势
+    firm_loan_repayment_speed: float = 0.30  # 营运资本贷款月度还本比例 (超工资单盈余部分)
 
     def normalized_labor_shares(self) -> dict[str, float]:
         """各部门劳动力配置比例 (SECTOR_DEFAULTS 劳动份额归一化)."""
@@ -161,7 +164,7 @@ class SimConfig(BaseModel):
     labor_separation_rate: float = 0.01   # 月度外生离职率 (默认 1%/月 ≈ 12%/年)
     labor_matching_efficiency: float = 0.5  # 匹配效率: f = 1 - exp(-η·V/U)
     labor_wage_adjust_freq: int = 6       # 工资调整频率(月)
-    labor_wage_phillips_coeff: float = 0.10  # κ: 失业缺口→工资(年率)
+    labor_wage_phillips_coeff: float = 0.04  # κ: 失业缺口→工资(年率). 校准2026-08: 0.10 时低失业环境让实际工资持续爬升越过生产率 (200月+50%), 企业毛利转负 → 债务慢性累积至清算.
 
     # ── Stock market (Phase 3 Week C): Brock-Hommes 异质信念 ──
     enable_stock_market: bool = False     # 默认关闭 (骨架已验证 SFC 干净)
@@ -219,8 +222,8 @@ class SimConfig(BaseModel):
     firm_dividend_payout: float = 0.40        # 每月对"工资单倍数以上"现金的分红比例
 
     # ── Labor market (Phase 3 Week B: 动态劳动需求 + 疤痕效应) ──
-    labor_adjust_up_speed: float = 0.25     # 每月最多扩员比例 (销售驱动招聘上限)
-    labor_adjust_down_speed: float = 0.35   # 每月最多裁员比例 (向下更快)
+    labor_adjust_up_speed: float = 0.15     # 每月最多扩员比例 (销售驱动招聘上限)
+    labor_adjust_down_speed: float = 0.06   # 每月最多裁员比例 (向下粘性: 快裁员放大需求塌缩螺旋)
     labor_inventory_buffer: float = 0.20    # 目标产量 = 销量 × (1+库存缓冲)
     labor_demand_response_delay: int = 1    # 雇佣决策对销售的滞后 (月, ≥0; 0=当月)
     wage_scar_discount_rate: float = 0.01   # 长期失业疤痕: 每超宽限月折扣

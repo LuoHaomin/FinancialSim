@@ -66,7 +66,10 @@ class TestDynamicLaborDemand:
         assert firms[0].baseline_employees == 125
 
     def test_negative_history_index_guarded(self):
-        lm = _make_labor(labor_demand_response_delay=5)
+        # 显式固定调整速度 (校准默认值已变 0.15/0.06), 只测索引越界守卫
+        lm = _make_labor(labor_demand_response_delay=5,
+                         labor_adjust_down_speed=0.35,
+                         labor_adjust_up_speed=0.25)
         firms = self._setup_firms()
         firms[0].sales_history = [50.0, 60.0]
         state = SimulationStateStub(firms)
