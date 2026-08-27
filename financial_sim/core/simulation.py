@@ -12,6 +12,7 @@ from financial_sim.config import SimConfig
 from financial_sim.core.state import SimulationState
 from financial_sim.core.step import monthly_tick
 from financial_sim.expectations.inflation import InflationExpectation
+from financial_sim.simulation.events import EventManager, build_event_manager
 from financial_sim.simulation.rng import RNGManager
 from financial_sim.utils.distributions import truncated_normal
 from financial_sim.utils.logging import get_logger
@@ -93,12 +94,16 @@ class Simulation:
             price=1.0,
             wage_offered=wage,
             employees=n_hh,
+            baseline_employees=n_hh,        # 摩擦雇佣目标 = 稳态全员
             deposits=initial_firm_deposits,
             debt=initial_firm_deposits,
             depreciation_rate=config.depreciation_rate,
             investment_sensitivity=config.investment_sensitivity,
             calvo_price_prob=config.calvo_price_prob,
             calvo_markup_target=config.calvo_markup_target,
+            default_equity_threshold=getattr(
+                config, "firm_default_equity_threshold", 0.0
+            ),
         )
 
         # ── 家庭 (异质: 储蓄率/MPC 截断正态; 工资对数正态) ──
@@ -138,6 +143,13 @@ class Simulation:
         government.debt += hh_total_deposits
 
         # ── 构造 state ──
+        # ── Phase 1+: 事件系统 (从 config.preset_shocks 自动装配) ──
+        em: EventManager | None = None
+        if bool(getattr(config, "enable_events", True)) and getattr(
+            config, "preset_shocks", None
+        ):
+            em = build_event_manager(config.preset_shocks)
+
         return SimulationState(
             t=0,
             config=config,
@@ -156,6 +168,7 @@ class Simulation:
                 value=config.initial_inflation, anchor=config.target_inflation
             ),
             rng_manager=self.rng,
+            event_manager=em,
         )
 
     # ════════════════════════════════════════════════════════════

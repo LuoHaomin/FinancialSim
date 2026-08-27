@@ -35,6 +35,10 @@ class CommercialBank:
     # ── 资本 ──
     capital: float = 0.0
 
+    # ── Phase 1+: NPL 跟踪 ──
+    npl_amount: float = 0.0              # 不良贷款余额
+    npl_writes_off_cumulative: float = 0.0  # 累计核销 (用于报告)
+
     # ── 监管/定价参数 ──
     car_requirement: float = 0.08
     car_buffer: float = 0.02
@@ -94,6 +98,38 @@ class CommercialBank:
         """支付存款利息 → 资本减少. (存款人一侧由 step 层镜像加到存款.)"""
         if amount > 0:
             self.capital -= amount
+
+    # ── Phase 1+: NPL & 违约处置 ──
+
+    def npl_ratio(self) -> float:
+        """不良贷款率 = npl / loans. 无贷款时返回 0."""
+        total_loans = self.loans_to_firms + self.loans_to_households
+        if total_loans <= 0:
+            return 0.0
+        return self.npl_amount / total_loans
+
+    def mark_npl(self, amount: float) -> None:
+        """标记不良 (仅记账, 不减资本)."""
+        if amount > 0:
+            self.npl_amount = max(0.0, self.npl_amount + amount)
+
+    def write_off_loan(self, amount: float) -> float:
+        """核销贷款: loans 减, capital 减 (同时减 npl).
+
+        SFC 注记: A = L + capital 同步收缩, 保持不变量.
+        返回实际核销金额 (≤ amount).
+        """
+        if amount <= 0:
+            return 0.0
+        # 受限于现有 NPL 余额
+        actual = min(amount, self.npl_amount, self.loans_to_firms)
+        if actual <= 0:
+            return 0.0
+        self.loans_to_firms -= actual
+        self.npl_amount = max(0.0, self.npl_amount - actual)
+        self.capital -= actual  # 损失直接侵蚀资本
+        self.npl_writes_off_cumulative += actual
+        return actual
 
 
 __all__ = ["CommercialBank"]

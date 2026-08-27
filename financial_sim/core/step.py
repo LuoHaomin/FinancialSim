@@ -46,6 +46,7 @@ def monthly_tick(
 
     logger.debug(f"=== Tick {state.t} start ===")
 
+    _apply_events(state)
     _cb_decisions(state)
     labor_market.clear(state)
     _pay_wages(state)
@@ -57,10 +58,27 @@ def monthly_tick(
     _bank_cycle(state)
     _government_cycle(state)
     _firm_capital_cycle(state)
+    _default_resolution(state)  # Phase 1+: 违约检测 + 处置 + 恢复
     _aggregate_macros(state)
     _validate_sfc(state)
 
     state.t += 1
+
+
+# ════════════════════════════════════════════════════════════
+# 0. 事件系统: 在 CB 决策之前注入参数冲击
+# ════════════════════════════════════════════════════════════
+def _apply_events(state: SimulationState) -> None:
+    """从 EventManager 触发当前 tick 的所有 ShockEvent, 并记录日志."""
+    mgr = getattr(state, "event_manager", None)
+    if mgr is None:
+        return
+    fired = mgr.apply_to_state(state, state.t)
+    for ev in fired:
+        state.shock_log.append(
+            {"t": state.t, "name": ev.name, "channel": ev.channel,
+             "magnitude": ev.magnitude}
+        )
 
 
 # ════════════════════════════════════════════════════════════
@@ -78,6 +96,23 @@ def _cb_decisions(state: SimulationState) -> None:
         smoothing=smoothing,
         rate_floor=floor,
     )
+
+
+# ════════════════════════════════════════════════════════════
+# 工具: 读取事件系统覆盖值 (无 manager 时返回原值)
+# ════════════════════════════════════════════════════════════
+def _effective_gov_multiplier(state: SimulationState) -> float:
+    mgr = getattr(state, "event_manager", None)
+    if mgr is None:
+        return 1.0
+    return mgr.get_gov_spending_multiplier(state)
+
+
+def _effective_income_tax_rate(state: SimulationState, base: float) -> float:
+    mgr = getattr(state, "event_manager", None)
+    if mgr is None:
+        return base
+    return mgr.get_income_tax_rate(state, base)
 
 
 # ════════════════════════════════════════════════════════════
@@ -235,7 +270,8 @@ def _government_cycle(state: SimulationState) -> None:
     assert firm is not None
     assert cb is not None
 
-    income_tax_rate = float(_cfg(state, "income_tax_rate", 0.25))
+    income_tax_rate_base = float(_cfg(state, "income_tax_rate", 0.25))
+    income_tax_rate = _effective_income_tax_rate(state, income_tax_rate_base)
     corp_tax_rate = float(_cfg(state, "corp_tax_rate", 0.21))
 
     # ── 收入税 (从工资中预扣; 同时下调 h.income 为税后口径) ──
@@ -260,6 +296,8 @@ def _government_cycle(state: SimulationState) -> None:
     if g_spending <= 0:
         share = float(_cfg(state, "gov_spending_share_gdp", 0.45))
         g_spending = share * state.potential_gdp
+    # Phase 1+: 应用事件系统的乘数 (fiscal_austerity / fiscal_stimulus)
+    g_spending *= _effective_gov_multiplier(state)
     benefit_per_hh = float(_cfg(state, "gov_unemployment_benefit", 0.0))
     unemployed = [h for h in state.households if not h.employed]
     total_benefits = benefit_per_hh * len(unemployed)
@@ -298,6 +336,76 @@ def _firm_capital_cycle(state: SimulationState) -> None:
     investment = firm.decide_investment()
     if investment > 0:
         firm.invest(investment)
+
+
+# ════════════════════════════════════════════════════════════
+# 8b. 违约处置: 触发 → 破产 → 银行核销 → 恢复注资
+# ════════════════════════════════════════════════════════════
+DEFAULT_COOLDOWN_MONTHS = 6  # 破产后 N 月再注资 (留出"重组"窗口)
+
+
+def _default_resolution(state: SimulationState) -> None:
+    """Phase 1+ 简化违约流程.
+
+    检测 → 处置 → 银行核销 → 计时 → (cool-down 后) 再注资.
+    SFC 注记: declare_bankruptcy 已把 firm.debt 减为 0, 此时银行核销贷款与
+    资本同步下降, 资产-负债恒等式保持.
+    """
+    if not bool(_cfg(state, "enable_default", True)):
+        # 仍推进计时, 否则后续逻辑可能误判 (但当前简化下不做破产)
+        return
+
+    firm = state.firm
+    bank = state.bank
+    if firm is None or bank is None:
+        return
+
+    # ── 1. 检测违约 (净资产 < 阈值 且 未破产) ──
+    if not firm.is_bankrupt and firm.is_default():
+        logger.info(f"Default detected at t={state.t}: equity={firm.equity():.2f}")
+        detail = firm.declare_bankruptcy()
+
+        # 银行镜像 (SFC 同步):
+        # 还款部分: firm 用存款还债
+        #   bank.deposits_from_firms -= repaid, bank.loans_to_firms -= repaid
+        #   A −X (loans), L −X (deposits); capital 不变 ✓
+        # 注: 准备金不变 (SFC 模型中借贷流程不动准备金)
+        if detail["debt_repaid"] > 0:
+            bank.deposits_from_firms = max(
+                0.0, bank.deposits_from_firms - detail["debt_repaid"]
+            )
+            bank.loans_to_firms = max(
+                0.0, bank.loans_to_firms - detail["debt_repaid"]
+            )
+
+        # 未偿还部分: 银行核销 (loans 减, capital 减, npl 清零)
+        #   A −X (loans), capital −X; L 不变 ✓
+        if detail["debt_unpaid"] > 0:
+            bank.mark_npl(detail["debt_unpaid"])
+            written = bank.write_off_loan(detail["debt_unpaid"])
+            logger.info(
+                f"  Bank wrote off {written:.2f}, "
+                f"CAR now {bank.car():.3f}"
+            )
+
+        # 解雇所有员工 (联动 HH 失业状态)
+        for h in state.households:
+            if h.employed and h.sector == firm.sector:
+                h.lose_job()
+
+    # ── 2. 破产计时 + 恢复注资 ──
+    if firm.is_bankrupt:
+        firm.tick_bankruptcy()
+        cooldown = int(_cfg(state, "default_cooldown_months", DEFAULT_COOLDOWN_MONTHS))
+        if firm.months_bankrupt >= cooldown:
+            # 银行新贷款注入资本: A 增加 (firm.deposits + capital) 与 L 同步 (debt + bank 负债)
+            recap_amount = float(_cfg(state, "recovery_capital_amount", 100.0))
+            bank.loans_to_firms += recap_amount
+            bank.deposits_from_firms += recap_amount
+            firm.recapitalize(recap_amount)
+            logger.info(
+                f"Recapitalized at t={state.t}: capital={recap_amount:.2f}"
+            )
 
 
 # ════════════════════════════════════════════════════════════

@@ -79,10 +79,26 @@ class SimConfig(BaseModel):
     hh_wage_lognormal_sigma: float = 0.3
     hh_initial_deposit_median: float = 20.0
 
-    # Other settings
+    # ── Labor market (Phase 1+: frictional hiring) ──
+    labor_full_employment: bool = False  # False=摩擦失业(默认), True=雇所有人(legacy)
+    labor_separation_rate: float = 0.01   # 月度外生离职率 (默认 1%/月 ≈ 12%/年)
+    labor_matching_efficiency: float = 0.5  # 匹配效率: f = 1 - exp(-η·V/U)
+    labor_wage_adjust_freq: int = 6       # 工资调整频率(月)
+    labor_wage_phillips_coeff: float = 0.10  # κ: 失业缺口→工资(年率)
+
+    # ── Default & Bankruptcy (Phase 1+ 简化违约) ──
+    enable_default: bool = True           # 启用企业违约检测
+    firm_default_equity_threshold: float = 0.0  # 净资产 < 阈值 → 违约
+    firm_bankruptcy_recovery: float = 0.5  # 资本清算回收率(实物资产折价)
+    bank_loss_to_capital: bool = True   # 违约损失直接侵蚀银行资本
+
+    # ── Event system (Phase 1+ ShockEvent) ──
+    enable_events: bool = True           # 启用事件注入
+    preset_shocks: list[str] = Field(default_factory=list)  # 启用的预设冲击名
+
+    # Other settings (legacy)
     enable_housing: bool = False
     enable_brock_hommes: bool = False
-    enable_events: bool = False
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> SimConfig:

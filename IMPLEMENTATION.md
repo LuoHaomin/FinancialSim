@@ -906,20 +906,6 @@ CES 生产函数的 σ、α_K、α_L 等参数表设计有，但**校准值**未
 
 **建议**：MVP 不加。Phase 3 看用户需求决定。
 
-### 8.3 决策请求
-
-请回答以下问题以开始 Phase 0：
-
-| # | 决策点 | 选项 |
-|---|---|---|
-| 1 | 是否直接按本计划开始 Phase 0？ | □ 是 / □ 调整后开始 |
-| 2 | Q4 家庭数量：Phase 0 用 1K 还是其他？ | □ 1K / □ 5K / □ 其他 |
-| 3 | Q2 部门参数：先用 stylized？ | □ 是 / □ 等真实数据 |
-| 4 | 测试驱动还是实现驱动？ | □ 测试驱动 (TDD) / □ 实现驱动 |
-| 5 | git workflow？ | □ main + feature / □ trunk-based / □ 其他 |
-| 6 | 是否立即创建项目脚手架？ | □ 是 / □ 先讨论 |
-
----
 
 ## 9. 附录：关键文件模板
 
@@ -1052,9 +1038,3 @@ def test_run_24_months_macro_stable():
     gdp_growth_12mo = state.real_gdp / state.real_gdp_history[0] - 1
     assert -0.30 < gdp_growth_12mo < 0.50
 ```
-
----
-
-## 10. 下一步
-
-按 §8.3 的决策请求确认后，**立即开始 Phase 0 Day 1：项目脚手架**。

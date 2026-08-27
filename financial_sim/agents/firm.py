@@ -45,6 +45,15 @@ class Firm:
     calvo_price_prob: float = 0.0        # 0 = 用库存规则
     calvo_markup_target: float = 0.10
 
+    # ── Phase 1+: 雇佣需求 + 违约追踪 ──
+    baseline_employees: int = 0          # 目标就业(由 labor_market 在外部设定)
+    months_negative_cashflow: int = 0    # 连续负现金流月数
+    is_bankrupt: bool = False            # 破产标志
+    months_bankrupt: int = 0             # 破产持续月数 (用于恢复判定)
+    default_equity_threshold: float = 0.0  # 净资产 < 此值 → 违约
+    bankruptcy_recovery: float = 0.5     # 资本清算回收率 (fire-sale 折扣)
+    recovery_capital: float = 100.0      # 恢复时再注入的资本量
+
     def production(self) -> float:
         """线性生产 Y = productivity × employees."""
         return self.productivity * self.employees
@@ -55,8 +64,19 @@ class Firm:
     def labor_cost(self) -> float:
         return self.employees * self.wage_offered
 
+    def equity(self) -> float:
+        """净资产 (资本化口径)."""
+        return self.deposits + self.inventory + self.capital - self.debt
+
     def profit(self) -> float:
+        """税前营业利润 = 收入 − 工资. 折旧/利息已通过资本/债务路径反映."""
         return self.revenue() - self.labor_cost()
+
+    def is_default(self) -> bool:
+        """Phase 1+ 违约判定: 净资产 < 阈值. 简化: 单一条件."""
+        if self.is_bankrupt:
+            return False  # 已处置
+        return self.equity() < self.default_equity_threshold
 
     def sell(self, quantity: float) -> float:
         """卖出 quantity 件商品, 收入存入 deposits. 返回 revenue."""
@@ -127,6 +147,69 @@ class Firm:
     def fire(self, n: int) -> None:
         """解雇 n 人. 不能降到 0 以下."""
         self.employees = max(0, self.employees - n)
+
+    # ── Phase 1+: 破产处置 ──
+
+    def declare_bankruptcy(self) -> dict[str, float]:
+        """进入破产处置. 返回处置明细 dict:
+            - recovered:  资本清算回收 (入 deposits)
+            - debt_unpaid: 银行核销的贷款额
+            - employees_fired: 解雇人数
+        """
+        if self.is_bankrupt:
+            return {"recovered": 0.0, "debt_unpaid": 0.0, "employees_fired": 0}
+
+        # 1. 资本清算: fire-sale 回收
+        recovered = self.capital * self.bankruptcy_recovery
+        self.capital = 0.0
+        self.deposits += recovered
+
+        # 2. 用存款尽可能偿还债务
+        repayment = min(self.debt, self.deposits)
+        self.deposits -= repayment
+        unpaid_debt = self.debt - repayment
+        self.debt = 0.0
+
+        # 3. 解雇所有员工
+        fired = self.employees
+        self.employees = 0
+
+        self.is_bankrupt = True
+        self.months_bankrupt = 0
+
+        return {
+            "recovered": recovered,
+            "debt_repaid": repayment,
+            "debt_unpaid": unpaid_debt,
+            "employees_fired": fired,
+        }
+
+    def tick_bankruptcy(self) -> None:
+        """破产状态计时 (供 step 层每月调用)."""
+        if self.is_bankrupt:
+            self.months_bankrupt += 1
+
+    def recapitalize(self, amount: float) -> None:
+        """破产后重新注资: 资本注入 + 同额债务 (银行新贷款).
+
+        SFC 注记: 这是资产端与负债端同步增加的"跨部门"操作, 调用方必须
+        同时操作银行账目 (firm 存款/银行负债 + 银行对 firm 贷款).
+
+        完整记账 (双方):
+            firm.deposits += amount  (现金进入企业账户)
+            firm.capital  += amount  (注入实物资本)
+            firm.debt     += amount  (银行新贷款)
+            bank.loans_to_firms    += amount
+            bank.deposits_from_firms += amount
+        """
+        if amount <= 0:
+            return
+        self.deposits += amount
+        self.capital = amount
+        self.debt = amount      # 同额银行新贷款
+        self.is_bankrupt = False
+        self.months_bankrupt = 0
+        # 不重置 employees — 由下个 tick 的 labor market 重新雇佣
 
 
 __all__ = ["Firm"]

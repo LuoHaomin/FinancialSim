@@ -76,6 +76,14 @@ class SimulationState:
     )
     rng_manager: object | None = None  # simulation.rng.RNGManager
 
+    # ── Phase 1+: 事件系统 (ShockEvent) ──
+    event_manager: object | None = None  # simulation.events.EventManager
+    shock_log: list[dict] = field(default_factory=list)  # 已触发的冲击记录
+
+    # ── 冲击瞬时覆盖 (one-shot 风格, 每月 step 读取) ──
+    _gov_spending_multiplier: float = 1.0
+    _income_tax_rate_override: float | None = None
+
     # ── 历史 (用于分析与绘图) ──
     macro_history: list[MacroSnapshot] = field(default_factory=list)
 
