@@ -33,13 +33,13 @@ class Government:
 
     # ── 流量 ──
     tax_revenue: float = 0.0
-    gov_spending: float = 200.0
-    transfers: float = 100.0
+    gov_spending: float = 0.0  # Phase 0 关闭
+    transfers: float = 0.0     # Phase 0 关闭
 
     # ── 参数 ──
     interest_rate: float = 0.025
-    income_tax_rate: float = 0.25
-    corp_tax_rate: float = 0.21
+    income_tax_rate: float = 0.0  # Phase 0 关闭
+    corp_tax_rate: float = 0.0    # Phase 0 关闭
 
     # ── 决策方法 ──
 

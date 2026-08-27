@@ -9,8 +9,9 @@ class TestGovernmentBasics:
         g = Government()
         assert g.debt == 0
         assert g.tax_revenue == 0
-        assert g.gov_spending > 0  # 默认有支出
-        assert g.transfers > 0     # 默认有转移支付
+        # Phase 0: 默认 gov_spending 和 transfers 关闭
+        assert g.gov_spending == 0
+        assert g.transfers == 0
 
     def test_interest_payment(self):
         g = Government(debt=1000, interest_rate=0.025)
@@ -19,27 +20,30 @@ class TestGovernmentBasics:
 
 class TestGovernmentTax:
     def test_collect_income_tax(self):
-        g = Government()
+        g = Government(income_tax_rate=0.25)
         tax = g.collect_taxes(total_income=10000, total_profit=0)
-        # 默认所得税率 25%
         assert tax == 2500
 
     def test_collect_corporate_tax(self):
-        g = Government()
+        g = Government(corp_tax_rate=0.21)
         tax = g.collect_taxes(total_income=0, total_profit=10000)
-        # 默认公司税率 21%
         assert tax == 2100
 
     def test_collect_both_taxes(self):
-        g = Government()
+        g = Government(income_tax_rate=0.25, corp_tax_rate=0.21)
         tax = g.collect_taxes(total_income=10000, total_profit=10000)
-        # 2500 + 2100 = 4600
         assert tax == 4600
 
     def test_loss_no_corporate_tax(self):
         """公司亏损不收税."""
-        g = Government()
+        g = Government(corp_tax_rate=0.21)
         tax = g.collect_taxes(total_income=0, total_profit=-1000)
+        assert tax == 0
+
+    def test_zero_tax_rates_default(self):
+        """Phase 0 默认所有税率为 0."""
+        g = Government()
+        tax = g.collect_taxes(total_income=10000, total_profit=10000)
         assert tax == 0
 
 

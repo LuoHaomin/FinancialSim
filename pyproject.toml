@@ -92,6 +92,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B011", "ERA001", "E741"]  # asserts, doc-comments, single-letter vars OK in tests
 "**/__init__.py" = ["F401"]  # re-exports OK
+"financial_sim/**/*.py" = ["ERA001", "E741"]  # Chinese inline comments OK in source
 
 [tool.ruff.lint.isort]
 known-first-party = ["financial_sim", "tests"]
