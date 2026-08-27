@@ -174,7 +174,14 @@ class SimConfig(BaseModel):
     stock_order_fraction: float = 0.15    # 每子步订单规模上限比例
     bh_temperature: float = 1.0           # fitness softmax 温度
     bh_fitness_decay: float = 0.05        # 旧适应度月衰减率
-    stock_substeps_per_month: int = 4     # 月内子步数 (近似日级; Q9 性能阀)
+    stock_substeps_per_month: int = 12    # 月内子步数 (日级近似; Q9 性能阀;
+                                          # 校准实测 12 子步时波动聚集 |r_t| autocorr 均值 0.31)
+    # ── Week C M2: 家庭组合选择 (deposits ↔ stocks) ──
+    hh_risk_tolerance_mean: float = 0.5   # 风险偏好均值 (截断 [0,1])
+    hh_risk_tolerance_std: float = 0.2
+    portfolio_weight_base: float = 0.05   # 目标股票权重基数
+    portfolio_weight_tol_coeff: float = 0.40  # 目标权重 = base + coeff×risk_tolerance
+    portfolio_rebalance_speed: float = 0.20   # 每月向目标权重迁移比例
 
     # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
     enable_firm_dividends: bool = True

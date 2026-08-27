@@ -87,3 +87,82 @@ class TestStockSnapshot:
 
     def test_version_is_4(self):
         assert SNAPSHOT_VERSION == 4
+
+
+class TestPortfolioChoiceM2:
+    """Week C M2: risk_tolerance 组合选择 (家庭间过户语义)."""
+
+    def _run(self, seed: int = 42, n_ticks: int = 36):
+        sim = _stock_sim(n_ticks=n_ticks, seed=seed)
+        return sim.run(n_ticks)
+
+    def test_risk_tolerance_heterogeneous(self):
+        state = self._run()
+        tols = [h.risk_tolerance for h in state.households]
+        assert max(tols) - min(tols) > 0.1      # 分布有离散度
+        assert all(0.0 <= t <= 1.0 for t in tols)
+
+    def test_supply_conserved_under_rebalance(self):
+        """再平衡是家庭间过户: 总持仓仍等于发行股数."""
+        state = self._run(seed=42)
+        mkt = state.stock_market
+        held = sum(h.stock_units for h in state.households)
+        assert abs(held - mkt.supply_units) < 1e-6 * max(1.0, mkt.supply_units)
+
+    def test_deposit_mirror_after_rebalance(self):
+        state = self._run(seed=7)
+        hh = sum(h.deposits for h in state.households)
+        bk = state.bank.deposits_from_hh
+        assert abs(hh - bk) < 1e-6 * max(1.0, abs(bk))
+
+    def test_rebalance_tolerant_households_hold_more(self):
+        """高风险偏好家庭的股票权重应系统性更高 (横截面)."""
+        state = self._run(seed=42)
+        price = max(state.stock_market.price, 1e-9)
+        rows = []
+        for h in state.households:
+            wealth = h.deposits + h.stock_units * price
+            if wealth <= 1e-9:
+                continue
+            rows.append((h.risk_tolerance,
+                         h.stock_units * price / wealth))
+        rows.sort(key=lambda x: x[0])
+        low = np.mean([w for _, w in rows[: len(rows) // 4]])
+        high = np.mean([w for _, w in rows[-len(rows) // 4 :]])
+        assert high > low, (
+            f"高 tolerance 四分位权重 {high:.3f} 应 > 低四分位 {low:.3f}"
+        )
+
+
+class TestVolClusteringCalibration:
+    """校准项: |r_t| 自相关 > 0.1 (波动聚集, BH 内生产物)."""
+
+    def test_abs_return_autocorr_multi_seed(self):
+        acs = []
+        for seed in (7, 42, 99):
+            sim = _stock_sim(n_ticks=120, seed=seed)
+            state = sim.run(120)
+            p = np.array(state.stock_market.price_history)
+            r = np.diff(p) / p[:-1]
+            ar = np.abs(r)
+            if len(ar) < 12 or float(np.std(ar)) < 1e-12:
+                continue
+            acs.append(float(np.corrcoef(ar[1:], ar[:-1])[0, 1]))
+        assert acs, "无有效样本"
+        mean_ac = float(np.mean(acs))
+        assert mean_ac > 0.10, f"|r| 自相关均值 {mean_ac:.3f} 应 >0.1"
+
+
+class TestStockPerfQ9:
+    """Q9 性能实测: 股市开启时的 tick 开销在预算内."""
+
+    def test_tick_latency_with_market_on(self):
+        import time
+
+        sim = _stock_sim(n_ticks=24, seed=42)
+        t0 = time.perf_counter()
+        sim.run(24)
+        elapsed = time.perf_counter() - t0
+        per_tick_ms = elapsed / 24 * 1000
+        # 本机实测 ~7ms/tick (n=300); CI 宽松上限 250ms 防抖动
+        assert per_tick_ms < 250, f"tick 均耗时 {per_tick_ms:.1f}ms 超预算"

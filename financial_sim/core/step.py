@@ -72,6 +72,7 @@ def monthly_tick(
     _interbank_cycle(state)               # Phase 2: 同业利息 (n_banks>1 时生效)
     _fire_sale_and_failure(state)         # Phase 2: fire-sale + 失败处置
     _stock_market_cycle(state)            # Week C: BH 股票市场 (默认关闭)
+    _household_rebalance(state)           # Week C M2: risk_tolerance 组合再平衡
     _aggregate_macros(state)
     # Week B: 销售/需求历史入档 (劳动需求决策的滞后输入; 保留 13 个月窗口)
     for f in state.firms:
@@ -946,6 +947,73 @@ def _stock_market_cycle(state: SimulationState) -> None:
     bank = state.bank
     assert bank is not None
     bank.deposits_from_hh -= net_units * price    # 聚合镜像
+
+
+# ════════════════════════════════════════════════════════════
+# 8d. 家庭组合再平衡 (Week C M2): 存款 ↔ 股票 按 risk_tolerance
+# ════════════════════════════════════════════════════════════
+def _household_rebalance(state: SimulationState) -> None:
+    """各家庭向目标股票权重缓慢迁移: w* = base + coeff × risk_tolerance.
+
+    供给守恒的过户语义 (SFC 关键约定):
+      家庭间的买卖互相配对成交 — 总股数与聚合存款均不变,
+      只是存款在买卖双方之间转移 + 股票过户.
+      未配对的超额需求/供给当期不成交 (下期价格调整后再试).
+    """
+    if not bool(_cfg(state, "enable_stock_market", False)):
+        return
+    mkt = state.stock_market
+    if mkt is None or getattr(mkt, "supply_units", 0.0) <= 0:
+        return
+    price = max(mkt.price, 1e-9)
+    base = float(_cfg(state, "portfolio_weight_base", 0.05))
+    tol_coeff = float(_cfg(state, "portfolio_weight_tol_coeff", 0.40))
+    speed = min(1.0, float(_cfg(state, "portfolio_rebalance_speed", 0.20)))
+
+    buyers: list[tuple[object, float]] = []   # (hh, 意愿买入金额>0)
+    sellers: list[tuple[object, float]] = []  # (hh, 意愿卖出金额>0)
+    for h in state.households:
+        wealth = h.deposits + h.stock_units * price
+        if wealth <= 0:
+            continue
+        w_star = min(0.90, max(0.0, base + tol_coeff * h.risk_tolerance))
+        w_cur = h.stock_units * price / wealth
+        want = speed * (w_star - w_cur) * wealth
+        if want > 1e-9:
+            buyers.append((h, min(want, h.deposits)))   # 不透支存款
+        elif want < -1e-9:
+            sellers.append((h, min(-want, h.stock_units * price)))
+
+    total_buy = sum(v for _, v in buyers)
+    total_sell = sum(v for _, v in sellers)
+    matched = min(total_buy, total_sell)
+    if matched < 1e-9:
+        return
+
+    # 等额配对: 买方按意愿比例分配 matched 金额, 卖方对称
+    done_buy = 0.0
+    for i, (h, want) in enumerate(buyers):
+        pay = (
+            matched * want / total_buy
+            if i < len(buyers) - 1
+            else matched - done_buy     # 残差给最后一家
+        )
+        pay = min(pay, h.deposits)
+        h.deposits -= pay
+        h.stock_units += pay / price
+        done_buy += pay
+    done_sell = 0.0
+    for i, (h, want) in enumerate(sellers):
+        receive = (
+            matched * want / total_sell
+            if i < len(sellers) - 1
+            else matched - done_sell
+        )
+        sell_units = receive / price
+        sell_units = min(sell_units, h.stock_units)
+        h.stock_units -= sell_units
+        h.deposits += sell_units * price
+        done_sell += sell_units * price
 
 
 # REO 清算: 把银行止赎房产卖给家庭 (所有权转移, SFC 镜像)

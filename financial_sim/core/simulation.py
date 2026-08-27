@@ -319,10 +319,14 @@ class Simulation:
                 )
                 stock_market.price = max(ipo_price, 0.01)
                 stock_market.price_history.append(stock_market.price)
-                for h in households:
-                    h.stock_units = (
-                        total_supply * h.deposits / hh_dep_init
-                    )
+                tol_draws = truncated_normal(
+                    h_rng,
+                    config.hh_risk_tolerance_mean,
+                    config.hh_risk_tolerance_std, 0.01, 1.0, n_hh,
+                )
+                for i, h in enumerate(households):
+                    h.risk_tolerance = float(tol_draws[i])
+                    h.stock_units = total_supply * h.deposits / hh_dep_init
 
         return SimulationState(
             t=0,

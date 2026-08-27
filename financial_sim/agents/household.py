@@ -70,6 +70,7 @@ class Household:
 
     # ── Phase 3 Week C: 股票持仓 ──
     stock_units: float = 0.0               # 持有股票指数单位数
+    risk_tolerance: float = 0.5            # 风险偏好 ∈ [0,1] (组合选择)
 
     def decide_consumption(self) -> float:
         """消费决策: c = mpc·Y^perm + λ·max(0, NW − buffer·Y^perm).

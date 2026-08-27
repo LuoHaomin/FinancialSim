@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 ✅ / Week A ✅ / Week B ✅ / **Week C 里程碑 1 ✅ (BH 股票市场骨架, 默认关闭)**
+> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 ✅ / Week A ✅ / Week B ✅ / **Week C M1+M2 ✅ (BH 股市 + 组合选择 + 波动聚集校准)**
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,18 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 273 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+**测试基线**: 279 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+
+### Phase 3 Week C 里程碑 2: 组合选择 + 波动聚集校准（2026-08-27 完成）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **C-M2a risk_tolerance** | ✅ | 家庭风险偏好 ∈[0,1] 截断正态初始化；目标股票权重 w*=0.05+0.40×tol，20%/月向目标迁移 |
+| **C-M2b 过户语义** | ✅ | 再平衡按"家庭间等额配对成交"实现: 总股数守恒、聚合存款不动（否则凭空增减持仓破坏供给守恒） |
+| **C-M2c 波动聚集** | ✅ | 子步 4→12 (日级近似): \|r_t\| 自相关均值 0.31 > 0.1 (三种子)，年化波动 ~30% |
+| **Q9 性能实测** | ✅ | n=300 股市全开 ~7ms/tick，测试上限 250ms |
+
+横截面验收: 高 tolerance 四分位的实际股票权重系统性高于低四分位。
 
 ### Phase 3 Week C 里程碑 1: Brock-Hommes 股票市场（2026-08-27 完成）
 
@@ -33,9 +44,8 @@
 零 SFC 违反; 持仓守恒 = 总股数; Σhh.deposits 与银行镜像逐位一致;
 厚尾 kurtosis≥3; 同种子逐位复现; 快照 v4 roundtrip.
 
-**Week C 后续里程碑** (留待继续): 家庭组合选择 risk_tolerance 化;
-交叉持股骨架 (Scale-Free 图); 波动聚集 autocorr 校准入套件;
-日级循环性能实测 (Q9).
+**Week C 后续里程碑** (留待继续): 交叉持股骨架 (Scale-Free 图);
+i-bank/资管接入为股市对手方 (Week D).
 
 ### Phase 3 Week B: 劳动市场跨部门流动 + 失业深化（2026-08-27 完成）
 
