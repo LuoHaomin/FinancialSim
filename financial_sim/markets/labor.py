@@ -83,15 +83,14 @@ class LaborMarket:
 
         顺序:
         1. 外生离职 (用 RNGManager 'labor_separation' 流抽样保证可复现)
-        2. 雇佣 (legacy 全雇佣 或 摩擦匹配)
+        2. 雇佣 (legacy 全雇佣 或 摩擦匹配; Phase 3: 跨企业分配岗位)
         3. 工资调整 (按 wage_adjust_freq 周期)
         4. 失业计时推进
 
         注: 不在内部从 state.config 自动 configure, 以保持测试隔离性.
         调用方应在构造仿真时一次性配置 (见 Simulation._build_state).
         """
-        firm = state.firm
-        if firm is None:
+        if not state.firms:
             return
 
         # 1. 外生离职
@@ -106,9 +105,6 @@ class LaborMarket:
         # 3. 工资调整
         if state.t > 0 and state.t % self.wage_adjust_freq == 0:
             self._adjust_wages(state)
-            for h in state.households:
-                if h.employed:
-                    h.wage = firm.wage_offered
 
         # 4. 失业计时推进
         for h in state.households:
@@ -118,9 +114,9 @@ class LaborMarket:
     # 1. 外生离职
     # ════════════════════════════════════════════════════════════
     def _apply_separations(self, state: SimulationState) -> None:
-        """按 separation_rate 随机解雇员工. 使用 RNG 'labor' 流."""
-        firm = state.firm
-        if firm is None or firm.employees <= 0:
+        """按 separation_rate 随机解雇员工 (跨企业, 按雇主归属扣减)."""
+        employed = [h for h in state.households if h.employed]
+        if not employed or not state.firms:
             return
         rate = self.separation_rate
         if rate <= 0:
@@ -129,77 +125,102 @@ class LaborMarket:
         mgr = getattr(state, "rng_manager", None)
         if mgr is not None:
             rng = mgr.stream("labor_separation")
-            employed = [h for h in state.households if h.employed]
-            if not employed:
-                return
             n_separated = int(rng.binomial(len(employed), rate))
+            idx = (
+                {int(i) for i in rng.choice(
+                    len(employed), size=n_separated, replace=False)}
+                if n_separated > 0 else set()
+            )
         else:
             # Fallback: 期望值, 不可复现
-            n_separated = int(round(firm.employees * rate))
+            n_separated = int(round(len(employed) * rate))
+            idx = set(range(min(n_separated, len(employed))))
 
-        n_separated = min(n_separated, firm.employees)
-        if n_separated <= 0:
-            return
-
-        # 选择前 n_separated 个 employed (确定性切片; RNG 已控制 n)
-        separated_idx = set()
-        if mgr is not None:
-            rng = mgr.stream("labor_separation")
-            idx = rng.choice(len(employed), size=n_separated, replace=False)
-            separated_idx = {int(i) for i in idx}
+        fired_per_firm: dict[str, int] = {}
         for i, h in enumerate(employed):
-            if i in separated_idx or (not separated_idx and n_separated > 0):
-                h.lose_job()
-                n_separated -= 1
-                if n_separated <= 0:
-                    break
-
-        firm.fire(len(employed) - sum(1 for h in employed if h.employed))
+            if i not in idx:
+                continue
+            employer_id = h.employer_id
+            h.lose_job()
+            if employer_id is not None:
+                fired_per_firm[employer_id] = fired_per_firm.get(employer_id, 0) + 1
+        for f in state.firms:
+            n = fired_per_firm.get(f.id, 0)
+            if n > 0:
+                f.fire(n)
 
     # ════════════════════════════════════════════════════════════
     # 2a. Legacy: 全雇佣
     # ════════════════════════════════════════════════════════════
     def _full_employment_hire(self, state: SimulationState) -> None:
         """雇佣所有失业者 (Phase 0 行为, 仅用于回归测试)."""
-        firm = state.firm
-        if firm is None:
+        if not state.firms:
             return
         for h in state.households:
             if not h.employed:
+                firm = state.firms[0]  # legacy: 单一雇主
                 firm.hire(1)
-                h.find_job(sector=firm.sector, wage=firm.wage_offered)
+                h.find_job(
+                    sector=firm.sector, wage=firm.wage_offered,
+                    employer_id=firm.id,
+                )
 
-    # ════════════════════════════════════════════════════════════
-    # 2b. 摩擦雇佣 (默认)
-    # ════════════════════════════════════════════════════════════
     def _frictional_hire(self, state: SimulationState) -> None:
-        """搜索-匹配模型: f(θ) = 1 − exp(−η·V/U), 雇佣数取 ⌈U·f⌉ 与 V 的较小值."""
-        firm = state.firm
-        if firm is None:
+        """搜索-匹配模型 (跨企业): f(θ) = 1 − exp(−η·V/U).
+
+        招聘命中率由总紧度决定; 命中的名额按各企业岗位空缺占比分配
+        (FIFO 取失业者, 确定性顺序).
+        """
+        if not state.firms:
             return
 
-        # 目标就业 = 基准 (由 firm.baseline_employees 或劳动力规模估算)
-        desired = firm.baseline_employees if firm.baseline_employees > 0 else len(state.households)
-        # 平滑调整: desired 可随生产缺口微调 (Phase 1 简化为固定)
-        vacancies = max(0, desired - firm.employees)
+        vacancies_per_firm = {
+            f.id: max(
+                0,
+                (f.baseline_employees if f.baseline_employees > 0
+                 else len(state.households)) - f.employees,
+            )
+            for f in state.firms if not f.is_bankrupt
+        }
+        total_vacancies = sum(vacancies_per_firm.values())
         unemployed_hh = [h for h in state.households if not h.employed]
         n_unemployed = len(unemployed_hh)
-        if vacancies == 0 or n_unemployed == 0:
+        if total_vacancies == 0 or n_unemployed == 0:
             return
 
-        # 紧度 θ = V/U. 若 U > 0 且 V > 0:
-        theta = vacancies / n_unemployed
-        f = 1.0 - math.exp(-self.matching_efficiency * theta)
-        n_hires = min(vacancies, int(math.ceil(n_unemployed * f)))
+        theta = total_vacancies / n_unemployed
+        f_match = 1.0 - math.exp(-self.matching_efficiency * theta)
+        n_hires = min(total_vacancies, int(math.ceil(n_unemployed * f_match)))
 
-        # FIFO 雇佣 (确定性顺序, RNG 仅控制离职环节)
-        for h in unemployed_hh[:n_hires]:
-            firm.hire(1)
-            h.find_job(sector=firm.sector, wage=firm.wage_offered)
+        # 名额按空缺比例分配到企业; 舍入余量给空缺最多的企业
+        alloc = {
+            fid: int(n_hires * v / total_vacancies)
+            for fid, v in vacancies_per_firm.items()
+        }
+        remainder = n_hires - sum(alloc.values())
+        if remainder > 0:
+            top = max(vacancies_per_firm, key=lambda k: vacancies_per_firm[k])
+            alloc[top] += remainder
+
+        hire_iter = iter(unemployed_hh)
+        firm_by_id = {f.id: f for f in state.firms}
+        hired_total = 0
+        for fid, n in alloc.items():
+            firm = firm_by_id[fid]
+            for _ in range(n):
+                h = next(hire_iter, None)
+                if h is None:
+                    break
+                firm.hire(1)
+                h.find_job(
+                    sector=firm.sector, wage=firm.wage_offered,
+                    employer_id=firm.id,
+                )
+                hired_total += 1
 
         logger.debug(
-            f"  labor: desired={desired}, V={vacancies}, U={n_unemployed}, "
-            f"θ={theta:.2f}, f={f:.2f}, hires={n_hires}"
+            f"  labor: V={total_vacancies}, U={n_unemployed}, "
+            f"θ={theta:.2f}, f={f_match:.2f}, hires={hired_total}"
         )
 
     # ════════════════════════════════════════════════════════════
@@ -209,9 +230,9 @@ class LaborMarket:
         """基于通胀预期 + 失业缺口的工资方程 (向下粘性).
 
         Δw/w = π_exp / 2 + κ · (NAIRU − u)   (紧缩期 κ × 0.5)
+        所有企业同步调整 (单一劳动市场议价), 并同步员工合同工资.
         """
-        firm = state.firm
-        if firm is None:
+        if not state.firms:
             return
 
         unemployment = state.unemployment_rate_calc()
@@ -228,7 +249,12 @@ class LaborMarket:
                 indexation + self.wage_phillips_coeff * unemployment_gap
             )
 
-        firm.wage_offered *= 1.0 + pressure
+        employer_by_id = {f.id: f for f in state.firms}
+        for firm in state.firms:
+            firm.wage_offered *= 1.0 + pressure
+        for h in state.households:
+            if h.employed and h.employer_id in employer_by_id:
+                h.wage = employer_by_id[h.employer_id].wage_offered
 
 
 __all__ = ["LaborMarket"]

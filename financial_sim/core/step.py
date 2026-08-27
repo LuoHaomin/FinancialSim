@@ -49,6 +49,8 @@ def monthly_tick(
     _apply_events(state)
     _cb_decisions(state)
     labor_market.clear(state)
+    for f in state.firms:
+        f.last_sales = 0.0  # 本月销售额清零 (消费 + 投资采购写入)
     _pay_wages(state)
     _consumer_credit_cycle(state)         # Phase 3 前置 P0-a: 消费贷申请 + 配给 + 还款
     _household_consumption(state)
@@ -122,37 +124,43 @@ def _effective_income_tax_rate(state: SimulationState, base: float) -> float:
 
 
 # ════════════════════════════════════════════════════════════
-# 3. 工资支付
+# 3. 工资支付 (Phase 3: 按雇主归属逐企业支付)
 # ════════════════════════════════════════════════════════════
 def _pay_wages(state: SimulationState) -> None:
-    """Firm 给员工发工资, 钱从 firm.deposits 转到 hh.deposits."""
-    firm = state.firm
+    """各企业给自己的员工发工资, 钱从 firm.deposits 转到 hh.deposits."""
     bank = state.bank
-    assert firm is not None
     assert bank is not None
 
     employed_hh = [h for h in state.households if h.employed]
     if not employed_hh:
         return
 
-    total_wages = firm.employees * firm.wage_offered
-
-    # 存款不足时向银行借款补足 (债务资本化, 不动资本)
-    if firm.deposits < total_wages:
-        shortfall = total_wages - firm.deposits
-        firm.debt += shortfall
-        bank.loans_to_firms += shortfall
-        bank.deposits_from_firms += shortfall
-        firm.deposits += shortfall
-
-    firm.deposits -= total_wages
-    bank.deposits_from_firms -= total_wages
-    bank.deposits_from_hh += total_wages
-
-    wage_per_hh = total_wages / len(employed_hh)
+    by_employer: dict[str | None, list] = {}
     for h in employed_hh:
-        h.income = wage_per_hh
-        h.deposits += wage_per_hh
+        by_employer.setdefault(h.employer_id, []).append(h)
+
+    for firm in state.firms:
+        group = by_employer.get(firm.id)
+        if not group:
+            continue
+        total_wages = len(group) * firm.wage_offered
+
+        # 存款不足时向银行借款补足 (债务资本化, 不动资本)
+        if firm.deposits < total_wages:
+            shortfall = total_wages - firm.deposits
+            firm.debt += shortfall
+            bank.loans_to_firms += shortfall
+            bank.deposits_from_firms += shortfall
+            firm.deposits += shortfall
+
+        firm.deposits -= total_wages
+        bank.deposits_from_firms -= total_wages
+        bank.deposits_from_hh += total_wages
+
+        wage_per_hh = total_wages / len(group)
+        for h in group:
+            h.income = wage_per_hh
+            h.deposits += wage_per_hh
 
 
 # ════════════════════════════════════════════════════════════
@@ -255,14 +263,51 @@ def _consumer_credit_cycle(state: SimulationState) -> None:
 
 
 # ════════════════════════════════════════════════════════════
-# 4. 家庭消费
+# 4. 家庭消费 (Phase 3: 需求按部门份额流向各企业)
 # ════════════════════════════════════════════════════════════
+def _distribute_to_firms(
+    state: SimulationState,
+    amount: float,
+    shares: dict[str, float],
+) -> list[tuple[object, float]]:
+    """把 amount 按部门份额分到企业, 舍入残差给最后一家.
+
+    返回 [(firm, 分配额)]; 分配额之和与 amount 逐位一致.
+    """
+    sector_firms: dict[str, list] = {}
+    for f in state.firms:
+        sector_firms.setdefault(f.sector, []).append(f)
+    alloc: list[tuple[object, float]] = []
+    if not state.firms or amount <= 0:
+        return alloc
+    pairs: list[tuple[object, float]] = []
+    for sector, share in shares.items():
+        group = sector_firms.get(sector)
+        if not group:
+            continue
+        per = amount * share / len(group)
+        for f in group:
+            pairs.append((f, per))
+    if not pairs:
+        # 配置份额没覆盖任何现有部门 → 全给第一家企业 (兜底)
+        return [(state.firms[0], amount)]
+    distributed = sum(v for _, v in pairs)
+    last_f, last_v = pairs[-1]
+    pairs[-1] = (last_f, last_v + (amount - distributed))  # 残差吸收
+    return pairs
+
+
 def _household_consumption(state: SimulationState) -> None:
-    """HH 决定消费, 受流动性约束 (不能超过存款)."""
-    firm = state.firm
+    """HH 决定消费, 受流动性约束; 消费按需求份额流向各部门企业."""
     bank = state.bank
-    assert firm is not None
     assert bank is not None
+
+    cfg = state.config
+    shares = (
+        cfg.normalized_demand_shares()
+        if cfg is not None and hasattr(cfg, "normalized_demand_shares")
+        else {}
+    )
 
     total_consumption = 0.0
     for h in state.households:
@@ -272,8 +317,11 @@ def _household_consumption(state: SimulationState) -> None:
         total_consumption += c
 
     if total_consumption > 0:
-        firm.deposits += total_consumption
-        firm.inventory = max(0.0, firm.inventory - total_consumption)
+        alloc = _distribute_to_firms(state, total_consumption, shares)
+        for f, v in alloc:
+            f.deposits += v
+            f.inventory = max(0.0, f.inventory - v)   # 实物出库
+            f.last_sales += v                          # 实际销售额 (定价基准)
         bank.deposits_from_hh -= total_consumption
         bank.deposits_from_firms += total_consumption
     state.last_month_sales = total_consumption
@@ -288,15 +336,15 @@ def _maybe_calvo_pricing(
 ) -> None:
     """以概率 θ 把价格调到目标加成价 (库存规则已在 clear() 生效).
 
-    抽签使用 RNGManager 的 'pricing' 流; 没有 manager 时跳过.
+    每家企业独立抽签; 抽签使用 RNGManager 的 'pricing' 流;
+    没有 manager 时跳过.
     """
-    firm = state.firm
-    assert firm is not None
     mgr = getattr(state, "rng_manager", None)
-    if mgr is None:
+    if mgr is None or not state.firms:
         return
     rng = mgr.stream("pricing")
-    firm.maybe_calvo_reprice(float(rng.random()))
+    for firm in state.firms:
+        firm.maybe_calvo_reprice(float(rng.random()))
     _ = goods_market
 
 
@@ -312,17 +360,17 @@ def _bank_cycle(state: SimulationState) -> None:
     - 付存款利息: hh/firm 存款 +d / 对应负债 +d / bank.capital −d
     """
     bank = state.bank
-    firm = state.firm
     cb = state.central_bank
     assert bank is not None
-    assert firm is not None
     assert cb is not None
 
     loan_rate, deposit_rate = bank.set_rates(cb.policy_rate)
 
-    # ── 贷款利息 ──
-    loan_interest = bank.loans_to_firms * loan_rate / 12.0
-    if loan_interest > 0:
+    # ── 贷款利息 (逐企业: 有存款付现金, 没存款资本化) ──
+    for firm in state.firms:
+        loan_interest = firm.debt * loan_rate / 12.0
+        if loan_interest <= 0:
+            continue
         if firm.deposits >= loan_interest:
             # 现金支付: 借款人存款 −i / 银行负债 −i / 资本 +i
             firm.deposits -= loan_interest
@@ -337,10 +385,10 @@ def _bank_cycle(state: SimulationState) -> None:
 
     # ── 存款利息 ──
     int_hh = bank.deposits_from_hh * deposit_rate / 12.0
-    int_firm = bank.deposits_from_firms * deposit_rate / 12.0
+    firm_dep_total = sum(f.deposits for f in state.firms)
+    int_firm = firm_dep_total * deposit_rate / 12.0
     if int_hh > 0:
-        n_emp = max(1, sum(1 for h in state.households if h.deposits > 0))
-        per_hh = int_hh / n_emp
+        per_hh = int_hh / max(1, sum(1 for h in state.households if h.deposits > 0))
         distributed = 0.0
         # 按人均分配 + 把舍入残差分配给最后一人 (避免 deposit drift)
         eligible = [h for h in state.households if h.deposits > 0]
@@ -349,8 +397,16 @@ def _bank_cycle(state: SimulationState) -> None:
             h.deposits += pay
             distributed += pay
         bank.deposits_from_hh += int_hh
-    if int_firm > 0:
-        firm.deposits += int_firm
+    if int_firm > 0 and firm_dep_total > 0:
+        eligible_firms = [f for f in state.firms if f.deposits > 0]
+        distributed = 0.0
+        for idx, f in enumerate(eligible_firms):
+            if idx < len(eligible_firms) - 1:
+                pay = int_firm * f.deposits / firm_dep_total
+                distributed += pay
+            else:
+                pay = int_firm - distributed  # 残差: 保证求和逐位一致
+            f.deposits += pay
         bank.deposits_from_firms += int_firm
     bank.book_deposit_interest_expense(int_hh + int_firm)
 
@@ -423,12 +479,17 @@ def _government_cycle(state: SimulationState) -> None:
 
     gov = state.government
     bank = state.bank
-    firm = state.firm
     cb = state.central_bank
     assert gov is not None
     assert bank is not None
-    assert firm is not None
     assert cb is not None
+
+    cfg = state.config
+    shares = (
+        cfg.normalized_demand_shares()
+        if cfg is not None and hasattr(cfg, "normalized_demand_shares")
+        else {}
+    )
 
     income_tax_rate_base = float(_cfg(state, "income_tax_rate", 0.25))
     income_tax_rate = _effective_income_tax_rate(state, income_tax_rate_base)
@@ -444,12 +505,15 @@ def _government_cycle(state: SimulationState) -> None:
             total_income_tax += t
     bank.deposits_from_hh -= total_income_tax
 
-    # ── 公司税 ──
-    corp_tax = max(0.0, firm.profit()) * corp_tax_rate
-    corp_tax = min(corp_tax, firm.deposits)
-    firm.deposits -= corp_tax
-    bank.deposits_from_firms -= corp_tax
-    gov.tax_revenue = total_income_tax + corp_tax
+    # ── 公司税 (逐企业) ──
+    corp_tax_total = 0.0
+    for f in state.firms:
+        t = max(0.0, f.profit()) * corp_tax_rate
+        t = min(t, f.deposits)
+        f.deposits -= t
+        corp_tax_total += t
+    bank.deposits_from_firms -= corp_tax_total
+    gov.tax_revenue = total_income_tax + corp_tax_total
 
     # ── 政府购买 G (流入 firm) 与失业救济 TR (流入失业家庭) ──
     g_spending = float(_cfg(state, "gov_spending_monthly", 0.0))
@@ -468,7 +532,9 @@ def _government_cycle(state: SimulationState) -> None:
             h.income = per_hh
         bank.deposits_from_hh += total_benefits
     if g_spending > 0:
-        firm.deposits += g_spending
+        alloc = _distribute_to_firms(state, g_spending, shares)
+        for f, v in alloc:
+            f.deposits += v
         bank.deposits_from_firms += g_spending
 
     gov.transfers = total_benefits
@@ -640,18 +706,76 @@ def _find_household(state: SimulationState, hid: str):
 
 
 # ════════════════════════════════════════════════════════════
-# 8. 企业资本循环: 折旧 + 投资
+# 8. 企业资本循环: 折旧 + 投资 (Phase 3 Week A: 投资实流化)
 # ════════════════════════════════════════════════════════════
 def _firm_capital_cycle(state: SimulationState) -> None:
-    """K ← K(1−δ) 后执行加速器投资 (deposits → capital, SFC 中性)."""
-    firm = state.firm
-    assert firm is not None
-    firm.depreciation_rate = float(_cfg(state, "depreciation_rate", 0.01))
-    firm.investment_sensitivity = float(_cfg(state, "investment_sensitivity", 0.5))
-    firm.depreciate()
-    investment = firm.decide_investment()
-    if investment > 0:
-        firm.invest(investment)
+    """K ← K(1−δ) 后执行加速器投资.
+
+    投资实流化 (存在资本品部门时):
+      采购价值 V = min(意愿 I, 资本品部门库存) — 资本形成受真实产能约束.
+      记账 (买卖双方 + 银行负债侧逐位镜像):
+        买方: deposits −V / capital +V
+        卖方: inventory −V / deposits +V / last_sales += V (资本品营收)
+        银行: deposits_from_firms 净额 0 (买方减 = 卖方增)
+        验收恒等式: Σ采购支出 == Σ资本品部门投资营收 (state.last_month_investment)
+
+    无资本品部门时 (legacy 单部门): 维持 Phase 0 的"留存利润实物化"
+    简化 (deposits 不动, capital += I), 见 Firm.invest 文档.
+
+    库存按名义市值记账: 交易以价值 V 结转, 不拆数量×单价 (文档化约定).
+    """
+    from financial_sim.config import CAPITAL_GOODS_SECTORS
+
+    dep_rate = float(_cfg(state, "depreciation_rate", 0.01))
+    inv_sens = float(_cfg(state, "investment_sensitivity", 0.5))
+    for f in state.firms:
+        f.depreciation_rate = dep_rate
+        f.investment_sensitivity = inv_sens
+
+    capital_sellers = [
+        f for f in state.firms
+        if f.sector in CAPITAL_GOODS_SECTORS and not f.is_bankrupt
+    ]
+
+    total_investment = 0.0
+    for buyer in state.firms:
+        if buyer.is_bankrupt:
+            continue
+        buyer.depreciate()
+        want = buyer.decide_investment()
+        if want <= 0:
+            continue
+
+        if not capital_sellers:
+            # legacy 路径: 无资本品部门 → 聚合实物化 (不动存款, SFC 中性)
+            buyer.invest(want)
+            total_investment += want
+            continue
+
+        # 实流化路径: 从资本品企业真实采购 (受库存产能约束)
+        remaining = min(want, sum(s.inventory for s in capital_sellers))
+        remaining = min(remaining, buyer.deposits)  # 审慎上限 (decide_investment 已含, 双保险)
+        for seller in capital_sellers:
+            if remaining <= 1e-9:
+                break
+            v = min(remaining, seller.inventory)
+            if v <= 0:
+                continue
+            # ── 记账 (同为主银行账内, 净额为零的镜像) ──
+            buyer.deposits -= v
+            bank = state.bank
+            assert bank is not None
+            bank.deposits_from_firms -= v
+            seller.deposits += v
+            bank.deposits_from_firms += v
+            # 实物 + 资本形成
+            seller.inventory = max(0.0, seller.inventory - v)
+            seller.last_sales += v     # 资本品营收
+            buyer.capital += v
+            total_investment += v
+            remaining -= v
+
+    state.last_month_investment = total_investment
 
 
 # ════════════════════════════════════════════════════════════
@@ -739,67 +863,74 @@ DEFAULT_COOLDOWN_MONTHS = 6  # 破产后 N 月再注资 (留出"重组"窗口)
 
 
 def _default_resolution(state: SimulationState) -> None:
-    """Phase 1+ 简化违约流程.
+    """Phase 1+ 简化违约流程 (Phase 3: 逐企业).
 
     检测 → 处置 → 银行核销 → 计时 → (cool-down 后) 再注资.
     SFC 注记: declare_bankruptcy 已把 firm.debt 减为 0, 此时银行核销贷款与
     资本同步下降, 资产-负债恒等式保持.
     """
     if not bool(_cfg(state, "enable_default", True)):
-        # 仍推进计时, 否则后续逻辑可能误判 (但当前简化下不做破产)
         return
 
-    firm = state.firm
     bank = state.bank
-    if firm is None or bank is None:
+    if bank is None or not state.firms:
         return
 
-    # ── 1. 检测违约 (净资产 < 阈值 且 未破产) ──
-    if not firm.is_bankrupt and firm.is_default():
-        logger.info(f"Default detected at t={state.t}: equity={firm.equity():.2f}")
-        detail = firm.declare_bankruptcy()
+    cooldown = int(_cfg(state, "default_cooldown_months", DEFAULT_COOLDOWN_MONTHS))
+    recap_amount = float(_cfg(state, "recovery_capital_amount", 100.0))
 
-        # 银行镜像 (SFC 同步):
-        # 还款部分: firm 用存款还债
-        #   bank.deposits_from_firms -= repaid, bank.loans_to_firms -= repaid
-        #   A −X (loans), L −X (deposits); capital 不变 ✓
-        # 注: 准备金不变 (SFC 模型中借贷流程不动准备金)
-        if detail["debt_repaid"] > 0:
-            bank.deposits_from_firms = max(
-                0.0, bank.deposits_from_firms - detail["debt_repaid"]
-            )
-            bank.loans_to_firms = max(
-                0.0, bank.loans_to_firms - detail["debt_repaid"]
-            )
+    for firm in state.firms:
+        # ── 1. 检测违约 (净资产 < 阈值 且 未破产) ──
+        if not firm.is_bankrupt and firm.is_default():
+            logger.info(f"Default detected at t={state.t}: {firm.id} equity={firm.equity():.2f}")
+            detail = firm.declare_bankruptcy()
 
-        # 未偿还部分: 银行核销 (loans 减, capital 减, npl 清零)
-        #   A −X (loans), capital −X; L 不变 ✓
-        if detail["debt_unpaid"] > 0:
-            bank.mark_npl(detail["debt_unpaid"])
-            written = bank.write_off_loan(detail["debt_unpaid"])
-            logger.info(
-                f"  Bank wrote off {written:.2f}, "
-                f"CAR now {bank.car():.3f}"
-            )
+            # 历史记账 bug (Phase 3 Week A 发现并修复): declare_bankruptcy 把
+            # 清算回收 R 记入 firm.deposits 却无银行对手方 → 每次 +R 的
+            # 企业存款幽灵增量被 SFC 捕获. 镜像: 银行接收等额清算资产.
+            #   bank: seized_assets ↑R / deposits_from_firms ↑R  (A=L+cap 保持)
+            if detail["recovered"] > 0:
+                bank.seized_assets += detail["recovered"]
+                bank.deposits_from_firms += detail["recovered"]
 
-        # 解雇所有员工 (联动 HH 失业状态)
-        for h in state.households:
-            if h.employed and h.sector == firm.sector:
-                h.lose_job()
+            # 银行镜像 (SFC 同步):
+            # 还款部分: firm 用存款还债 → A −X (loans), L −X (deposits)
+            # 注: 准备金不变 (SFC 模型中借贷流程不动准备金)
+            if detail["debt_repaid"] > 0:
+                bank.deposits_from_firms = max(
+                    0.0, bank.deposits_from_firms - detail["debt_repaid"]
+                )
+                bank.loans_to_firms = max(
+                    0.0, bank.loans_to_firms - detail["debt_repaid"]
+                )
 
-    # ── 2. 破产计时 + 恢复注资 ──
-    if firm.is_bankrupt:
-        firm.tick_bankruptcy()
-        cooldown = int(_cfg(state, "default_cooldown_months", DEFAULT_COOLDOWN_MONTHS))
-        if firm.months_bankrupt >= cooldown:
-            # 银行新贷款注入资本: A 增加 (firm.deposits + capital) 与 L 同步 (debt + bank 负债)
-            recap_amount = float(_cfg(state, "recovery_capital_amount", 100.0))
-            bank.loans_to_firms += recap_amount
-            bank.deposits_from_firms += recap_amount
-            firm.recapitalize(recap_amount)
-            logger.info(
-                f"Recapitalized at t={state.t}: capital={recap_amount:.2f}"
-            )
+            # 未偿还部分: 银行核销 (loans 减, capital 减)
+            #   A −X (loans), capital −X; L 不变 ✓
+            if detail["debt_unpaid"] > 0:
+                bank.mark_npl(detail["debt_unpaid"])
+                written = bank.write_off_loan(detail["debt_unpaid"])
+                logger.info(
+                    f"  Bank wrote off {written:.2f}, "
+                    f"CAR now {bank.car():.3f}"
+                )
+
+            # 解雇该企业员工 (联动 HH 失业状态)
+            for h in state.households:
+                if h.employed and h.employer_id == firm.id:
+                    h.lose_job()
+
+        # ── 2. 破产计时 + 恢复注资 ──
+        if firm.is_bankrupt:
+            firm.tick_bankruptcy()
+            if firm.months_bankrupt >= cooldown:
+                # 银行新贷款注入资本: A 与 L 同步增加
+                bank.loans_to_firms += recap_amount
+                bank.deposits_from_firms += recap_amount
+                firm.recapitalize(recap_amount)
+                logger.info(
+                    f"Recapitalized {firm.id} at t={state.t}: "
+                    f"capital={recap_amount:.2f}"
+                )
 
 
 # ════════════════════════════════════════════════════════════
@@ -807,10 +938,22 @@ def _default_resolution(state: SimulationState) -> None:
 # ════════════════════════════════════════════════════════════
 def _aggregate_macros(state: SimulationState) -> None:
     """计算并存储宏观变量: GDP、失业、通胀、预期、永久收入."""
-    firm = state.firm
-
     state.real_gdp = state.total_output()
-    state.nominal_gdp = state.real_gdp * firm.price if firm else 0.0
+    # 名义产出 = Σ Y_i × P_i; 价格水平 = 产出加权平均价 (单企业时与 legacy 一致)
+    nominal_gdp = sum(f.production() * f.price for f in state.firms)
+    state.nominal_gdp = nominal_gdp
+
+    # ⚠️ 时序约定 (与 Phase 1 一致, 勿改): 通胀先用**上一期**的价格水平算,
+    # 之后才把本期加权价写入 price_level/history.
+    # 若反过来, 首月环比 (+60% 年化) 会立刻打给 Taylor rule, 政策利率瞬时
+    # 尖峰会把房价推离基本面锚, baseline 会掉进抵押违约的脆弱盆地 (实测).
+    _update_inflation(state)
+    if state.real_gdp > 0:
+        new_price_level = nominal_gdp / state.real_gdp
+    elif state.firms:
+        new_price_level = state.firms[0].price
+    else:
+        new_price_level = state.price_level
     state.unemployment_rate = state.unemployment_rate_calc()
     state.output_gap = (
         (state.real_gdp - state.potential_gdp) / state.potential_gdp
@@ -820,10 +963,10 @@ def _aggregate_macros(state: SimulationState) -> None:
 
     _update_inflation(state)
 
-    # 价格水平进入历史 (通胀计算依赖)
-    if firm is not None:
-        state.price_level = firm.price
-    state.price_level_history.append(state.price_level)
+    # 价格水平进入历史: 先 append 本期值, 再覆盖 price_level
+    # (通胀已用上一期值计算完毕, 见上方时序约定注释)
+    state.price_level_history.append(new_price_level)
+    state.price_level = new_price_level
 
     for h in state.households:
         h.update_permanent_income()

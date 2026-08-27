@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 P0-a/b/c ✅
+> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 P0-a/b/c ✅ / **Phase 3 Week A ✅**
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,31 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 216 passed · 2 xfail · ruff clean · baseline 与危机场景均零 SFC 违反
+**测试基线**: 237 passed · 2 xfail · ruff clean · 单部门/6部门/危机/CES 四类场景均零 SFC 违反
+
+### Phase 3 Week A: 多部门 + 资本品闭环（2026-08-27 完成）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **A-1 多企业列表化** | ✅ | `state.firms: list[Firm]`，`state.firm` 为 `firms[0]` 别名 property；默认单部门行为与 Phase 2 逐位一致 |
+| **A-2 部门参数表** | ✅ | `config.SECTOR_DEFAULTS`: consumer/capital/energy/housing_services/high_tech/services 六部门的劳动份额+需求份额+TFP；`normalized_labor_shares()` / `normalized_demand_shares()` |
+| **A-3 CES 生产函数** | ✅ | `Firm.production_function="ces"`: Y=A·(αK^ρ+(1−α)L^ρ)^(1/ρ)，σ=1 走 Cobb-Douglas 守护；7 个数值单测。默认仍 linear |
+| **A-4 投资实流化** | ✅ | 企业投资向资本品部门真实采购: 买方 deposits−V/capital+V ↔ 卖方 inventory−V/deposits+V，受资本品库存约束；无资本品部门时回退 legacy 实物化路径 |
+| **A-5 编排多企业化** | ✅ | labor(按雇主归属离职/跨企业空缺分配雇佣)、wages、消费需求分流、银行利息/公司税/G 分配、违约处置逐企业执行 |
+| **A-6 快照 v3** | ✅ | 序列化 `firms` 列表，续跑可复现 |
+
+**Week A 过程中发现并修复的记账 bug**:
+- **破产清算存款幽灵**: `declare_bankruptcy` 把清算回收 R 直接记入 firm.deposits
+  却无银行对手方 → 每次破产 Δ≈R 的存款失配（多部门场景放大触发）。
+  修复: 新增 `bank.seized_assets` 科目接收等额清算资产
+  （`seized_assets↑R / deposits_from_firms↑R`, A=L+cap 保持），SFC 校验扩项同步。
+
+**遗留（进 Week B/后续）**:
+- 多部门摩擦失业再平衡偏慢（baseline 失业率 ~10-20%），需 Week B 失业池 +
+  部门再配置机制深化; 当前验收以零 SFC 违反为准
+- CES 未默认启用: 打开后企业对价格的反应会改变 baseline 校准, 留待稳态
+  重校准时一并切换 (§4.1 稳态修复)
+- 中间品 IO 矩阵顺延至 Week A 后半段/Week E (供应链网络), 见 §5
 
 ### Phase 3 前置批次 P0-a / P0-b / P0-c（2026-08-27 完成）
 
@@ -92,14 +116,16 @@ Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、�
 - [ ] P0-b: 债券市场 + 私人持债渠道 → §5.0
 - [ ] P0-c: scenarios/*.yaml 场景库 → §5.0
 
-### 已知建模限制（有意简化, Phase 3 修正）
+### 已知建模限制（有意简化, 后续修正）
 
-- 企业投资不消耗金融资源（隐含留存利润实物化假设）→ Phase 3 Week A 投资实流化关闭
-- 财政赤字 100% 由 CB 承接（无私人部门持债渠道）→ 前置批次 P0-b 部分脚手架, 完整记账留 Phase 3
+- ~~企业投资不消耗金融资源~~ → **Week A 已关闭**: 存在资本品部门时投资走真实采购
+  （deposits 在买卖企业间转移 + 库存出库）; 仅无资本品部门时保留 legacy 路径
+- **多部门 baseline 失业偏高**: 摩擦匹配按份额静态分配岗位, 缺部门间再配置 → Week B
 - 国债利息默认滚入本金（CB 利润上缴未建模）→ 前置批次 P0-b 部分处理, 剩余项留 Phase 5
-- 存款利率为单一聚合利率（无个体层级差异化）→ Phase 3 Week A 多主体化自然消解
+- 存款利率为单一聚合利率（无个体层级差异化）→ 多主体化后继续收敛
 - **多银行同业敞口初始化挂起**: 临时禁用, 留给 Phase 3 Week E 重新设计主银行语义
-- **Baseline 不稳态 (2026-08-27 尝试未根治)**: G/T 比例失衡 + 价格离散规则 (5%/月硬阶) + 单一企业生产函数不响应价格 → 政策利率贴 floor 或被发散通胀推到 100%+. 已在 `_bank_dividend_cycle` / 财富效应参数上做出工具脚手架, 但完整稳态需 Phase 3 Week A 重新校准生产函数 (`CES 多部门` 才能让生产响应价格). 详见下方 "稳态修复尝试" 章节.
+- **Baseline 不稳态**: G/T 比例失衡 + 价格离散规则硬阶 + 生产不响应价格 → 工具脚手架已备,
+  完整修复随 CES 启用 + Week B 失业池 + Week F 重校准. 详见 "稳态修复尝试" 章节.
 
 ---
 

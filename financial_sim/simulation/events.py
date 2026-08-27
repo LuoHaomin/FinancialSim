@@ -202,12 +202,10 @@ class EventManager:
         else:
             state._income_tax_rate_override = None
         if "wage_shock_mult" in effects:
-            firm = getattr(state, "firm", None)
-            if firm is not None:
+            for firm in getattr(state, "firms", []) or []:
                 firm.wage_offered *= 1.0 + effects["wage_shock_mult"]
         if "energy_price_mult" in effects:
-            firm = getattr(state, "firm", None)
-            if firm is not None:
+            for firm in getattr(state, "firms", []) or []:
                 # 注意: 这是简化的"一次性"应用; 持续冲击会逐月乘以 mult
                 firm.productivity *= effects["energy_price_mult"]
         if "housing_yield_delta" in effects:

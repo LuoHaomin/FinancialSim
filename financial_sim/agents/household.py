@@ -33,6 +33,7 @@ class Household:
 
     id: str
     sector: str | None = None
+    employer_id: str | None = None  # 雇主 firm.id (Phase 3 多企业)
 
     # ── 就业 ──
     wage: float = 0.0
@@ -121,13 +122,17 @@ class Household:
         """失业. 重置 unemployment_duration."""
         self.employed = False
         self.unemployment_duration = 0
+        self.employer_id = None
 
-    def find_job(self, sector: str, wage: float) -> None:
+    def find_job(
+        self, sector: str, wage: float, employer_id: str | None = None,
+    ) -> None:
         """找到工作. 重置失业计时, 切换部门."""
         self.employed = True
         self.unemployment_duration = 0
         self.sector = sector
         self.wage = wage
+        self.employer_id = employer_id
 
     def tick_unemployment(self) -> None:
         """失业 +1 月. 仅在 unemployed 时调用."""

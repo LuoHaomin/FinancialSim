@@ -29,6 +29,12 @@ class Firm:
     employees: int = 0
     capital_per_worker_target: float = 10.0  # 目标人均资本 (投资基准)
 
+    # ── Phase 3 Week A: CES 生产函数 (production_function="ces" 时启用) ──
+    production_function: str = "linear"   # "linear" | "ces"
+    sigma_elasticity: float = 0.5         # 替代弹性 σ (ρ = 1 − 1/σ; σ=1 → Cobb-Douglas)
+    alpha_capital: float = 0.3            # 资本份额 α (劳动份额 1−α)
+    last_sales: float = 0.0               # 上月实际销售额 (定价/库存基准, step 层写入)
+
     # ── 财务 ──
     cash: float = 0.0
     deposits: float = 0.0
@@ -55,8 +61,27 @@ class Firm:
     recovery_capital: float = 100.0      # 恢复时再注入的资本量
 
     def production(self) -> float:
-        """线性生产 Y = productivity × employees."""
-        return self.productivity * self.employees
+        """产出.
+
+        - linear: Y = A × L (Phase 0 形式)
+        - ces:    Y = A × (α·K^ρ + (1−α)·L^ρ)^(1/ρ), ρ = 1 − 1/σ
+          σ→∞ 时退化为线性; σ=1 时为 Cobb-Douglas A·K^α·L^(1−α) (数值守护).
+        """
+        if self.production_function != "ces":
+            return self.productivity * self.employees
+
+        rho = 1.0 - 1.0 / self.sigma_elasticity
+        labor = float(max(0, self.employees))
+        if labor <= 0:
+            return 0.0  # ρ<0 时劳动是必要投入 (互补情形), 无劳动即无产出
+        if abs(rho) < 1e-6:
+            # Cobb-Douglas 数值守护
+            cap_term = self.capital ** self.alpha_capital
+            lab_term = labor ** (1.0 - self.alpha_capital) if labor > 0 else 0.0
+            return self.productivity * cap_term * lab_term
+        k_term = self.alpha_capital * self.capital ** rho
+        l_term = (1.0 - self.alpha_capital) * labor ** rho
+        return self.productivity * (k_term + l_term) ** (1.0 / rho)
 
     def revenue(self) -> float:
         return self.production() * self.price

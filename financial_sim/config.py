@@ -10,6 +10,35 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
+# ════════════════════════════════════════════════════════════
+# Phase 3 Week A: 部门参数表 (stylized values; 真实数据 Phase 5 校准)
+# 未列出的部门名回退到 productivity=1 / price=1 / 均分份额.
+# ════════════════════════════════════════════════════════════
+# labor_share: 劳动力配置比例 (全部门归一化到 1)
+# demand_share: 消费/政府支出的需求流向比例 (资本品部门排除在外, 由投资驱动;
+#               在非资本品部门间归一化)
+# productivity: 全要素生产率 A; price: 初始价格
+SECTOR_DEFAULTS: dict[str, dict[str, float]] = {
+    "consumer_goods": {"labor_share": 0.40, "demand_share": 0.55,
+                       "productivity": 1.0, "price": 1.0},
+    "capital":        {"labor_share": 0.10, "demand_share": 0.00,
+                       "productivity": 1.0, "price": 1.0},
+    "energy":         {"labor_share": 0.10, "demand_share": 0.05,
+                       "productivity": 1.0, "price": 1.0},
+    "housing_services": {"labor_share": 0.15, "demand_share": 0.10,
+                         "productivity": 1.0, "price": 1.0},
+    "high_tech":      {"labor_share": 0.10, "demand_share": 0.10,
+                       "productivity": 1.2, "price": 1.0},
+    "services":       {"labor_share": 0.15, "demand_share": 0.20,
+                       "productivity": 1.0, "price": 1.0},
+}
+CAPITAL_GOODS_SECTORS = ("capital",)
+
+
+def sector_param(sector: str, key: str, default: float) -> float:
+    """读部门参数; 未知部门回退 default."""
+    return float(SECTOR_DEFAULTS.get(sector, {}).get(key, default))
+
 
 class SimConfig(BaseModel):
     """Top-level simulation configuration."""
@@ -80,6 +109,37 @@ class SimConfig(BaseModel):
     calvo_price_prob: float = 0.0             # 卡尔沃调价概率 (0=用库存规则;
                                               # 场景开启时注意加成棘轮会推高通胀)
     calvo_markup_target: float = 0.10         # 目标成本加成
+    production_function: str = "linear"       # "linear" | "ces" (Week A)
+    sigma_elasticity: float = 0.5             # CES 替代弹性 σ
+    alpha_capital: float = 0.3                # CES 资本份额 α
+
+    def normalized_labor_shares(self) -> dict[str, float]:
+        """各部门劳动力配置比例 (SECTOR_DEFAULTS 劳动份额归一化)."""
+        shares = {s: sector_param(s, "labor_share", 1.0) for s in self.sectors}
+        total = sum(shares.values())
+        if total <= 0:
+            n = max(1, len(shares))
+            return dict.fromkeys(shares, 1.0 / n)
+        return {s: v / total for s, v in shares.items()}
+
+    def normalized_demand_shares(self) -> dict[str, float]:
+        """消费/政府购买在非资本品部门间的需求份额 (归一化).
+
+        资本品部门的产出由企业投资采购驱动, 不直接承接家庭消费.
+        """
+        non_capital = [
+            s for s in self.sectors
+            if s not in CAPITAL_GOODS_SECTORS
+        ]
+        if not non_capital:
+            # 退化: 只有资本品部门时所有需求落它身上
+            return dict.fromkeys(self.sectors, 1.0)
+        raw = {s: sector_param(s, "demand_share", 1.0) for s in non_capital}
+        total = sum(raw.values())
+        if total <= 0:
+            n = len(non_capital)
+            return dict.fromkeys(non_capital, 1.0 / n)
+        return {s: v / total for s, v in raw.items()}
 
     # ── Household (消费行为) ──
     wealth_effect_coef: float = 0.0          # λ: 超额财富拉动消费

@@ -18,6 +18,15 @@ def _set_household_incomes(sim, wage: float = 1.0) -> None:
         h.mpc = 0.7
 
 
+def _set_firm_sales(sim, sales: float = 7.0) -> None:
+    """辅助: 写入上月实际销售额 (Phase 3 逐企业定价基准).
+
+    10 户 × mpc 0.7 × 工资 1 = 7.
+    """
+    for f in sim.state.firms:
+        f.last_sales = sales
+
+
 class TestGoodsMarketInventory:
     """库存-价格反馈."""
 
@@ -25,6 +34,7 @@ class TestGoodsMarketInventory:
         """库存 > 1.5 倍目标 → 降价 5%."""
         sim = Simulation(SimConfig(n_households=10, n_ticks=1))
         _set_household_incomes(sim)
+        _set_firm_sales(sim)
         firm = sim.state.firm
         assert firm is not None
 
@@ -40,6 +50,7 @@ class TestGoodsMarketInventory:
         """库存 < 0.5 倍目标 → 提价 5%."""
         sim = Simulation(SimConfig(n_households=10, n_ticks=1))
         _set_household_incomes(sim)
+        _set_firm_sales(sim)
         firm = sim.state.firm
         assert firm is not None
 
@@ -55,6 +66,7 @@ class TestGoodsMarketInventory:
         """库存正常 → 价格不变."""
         sim = Simulation(SimConfig(n_households=10, n_ticks=1))
         _set_household_incomes(sim)
+        _set_firm_sales(sim)
         firm = sim.state.firm
         assert firm is not None
 
@@ -73,6 +85,7 @@ class TestGoodsMarketInventoryUpdate:
     def test_inventory_update(self):
         sim = Simulation(SimConfig(n_households=10, n_ticks=1))
         _set_household_incomes(sim)
+        _set_firm_sales(sim)   # 销量 = 7
         firm = sim.state.firm
         assert firm is not None
 
@@ -90,6 +103,7 @@ class TestGoodsMarketInventoryUpdate:
         """库存不能为负 (强制下限 0)."""
         sim = Simulation(SimConfig(n_households=10, n_ticks=1))
         _set_household_incomes(sim)
+        _set_firm_sales(sim)   # 销量 = 7
         firm = sim.state.firm
         assert firm is not None
 

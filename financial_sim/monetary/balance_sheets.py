@@ -107,6 +107,7 @@ class CommercialBankBalanceSheet:
     gov_bonds_held: float = 0.0
     interbank_claims: float = 0.0
     reo_value: float = 0.0          # 止赎房产 (实物资产, 按清算价入账)
+    seized_assets: float = 0.0      # 破产企业清算资产接收值 (Phase 3 Week A)
     # ── 负债 ──
     deposits_from_hh: float = 0.0
     deposits_from_firms: float = 0.0
@@ -119,6 +120,7 @@ class CommercialBankBalanceSheet:
         return (
             self.reserves + self.loans_to_firms + self.loans_to_households
             + self.gov_bonds_held + self.interbank_claims + self.reo_value
+            + self.seized_assets
         )
 
     def sum_liabilities(self) -> float:

@@ -29,7 +29,7 @@ class SnapshotError(Exception):
     """快照版本不匹配或损坏."""
 
 
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 3  # v3: 多企业 (firms 列表) — Phase 3 Week A
 
 _AGENT_TYPES = {
     "household": Household,
@@ -66,7 +66,8 @@ class StateSnapshot:
             "t": state.t,
             "config": sim.config.model_dump(),
             "households": [_to_dict(h) for h in state.households],
-            "firm": _to_dict(state.firm) if state.firm else None,
+            # v3: firms 列表 (state.firm 只是 firms[0] 的别名, 不单独存)
+            "firms": [_to_dict(f) for f in state.firms],
             "bank": _to_dict(state.bank) if state.bank else None,
             "banks": [_to_dict(b) for b in state.banks],  # Phase 2: multi-bank
             "housing_market": (
@@ -113,8 +114,10 @@ class StateSnapshot:
         state.households = [
             _from_dict(h, Household) for h in payload["households"]  # type: ignore[arg-type]
         ]
-        if payload["firm"]:
-            state.firm = _from_dict(payload["firm"], Firm)  # type: ignore[arg-type]
+        if payload.get("firms"):
+            state.firms = [
+                _from_dict(f, Firm) for f in payload["firms"]  # type: ignore[arg-type]
+            ]
         # Phase 2: 还原 multi-bank 列表
         if "banks" in payload and payload["banks"]:
             state.banks = [

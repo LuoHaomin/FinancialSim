@@ -62,11 +62,27 @@ class SimulationState:
 
     # ── Agents ──
     households: list[Household] = field(default_factory=list)
-    firm: Firm | None = None  # Phase 0: 单一聚合企业
+    # Phase 3 Week A: 多企业 (每部门 >=1 家). state.firm 是 firms[0] 的
+    # 只读别名 (property), 保证旧代码路径与快照兼容; 聚合资金流必须逐企业记账.
+    firms: list[Firm] = field(default_factory=list)
     bank: CommercialBank | None = None  # 主银行 (n_banks=1 时为唯一银行, 否则聚合代理)
     banks: list[CommercialBank] = field(default_factory=list)  # Phase 2: 全部银行
     government: Government | None = None
     central_bank: CentralBank | None = None
+
+    @property
+    def firm(self) -> Firm | None:
+        """主企业 = firms[0] (向后兼容别名; 禁止用它做聚合记账)."""
+        return self.firms[0] if self.firms else None
+
+    @firm.setter
+    def firm(self, value: Firm | None) -> None:
+        if value is None:
+            self.firms = []
+        elif self.firms:
+            self.firms[0] = value
+        else:
+            self.firms = [value]
 
     # ── 宏观变量 ──
     real_gdp: float = 0.0
@@ -80,6 +96,7 @@ class SimulationState:
     price_level: float = 1.0
     price_level_history: list[float] = field(default_factory=list)
     last_month_sales: float = 0.0  # 上月实际销量 (商品市场定价基准)
+    last_month_investment: float = 0.0  # 上月投资采购总额 (Week A 验收恒等式)
     inflation_expectation: InflationExpectation = field(
         default_factory=InflationExpectation
     )
@@ -147,9 +164,15 @@ class SimulationState:
         return sum(h.income for h in self.households)
 
     def total_output(self) -> float:
-        if self.firm is None:
-            return 0.0
-        return self.firm.production()
+        return sum(f.production() for f in self.firms)
+
+    def total_capital_goods_capacity(self) -> float:
+        """资本品部门的总库存 (可被投资采购的真实产能)."""
+        from financial_sim.config import CAPITAL_GOODS_SECTORS
+        return sum(
+            f.inventory for f in self.firms
+            if f.sector in CAPITAL_GOODS_SECTORS
+        )
 
     def total_household_deposits(self) -> float:
         return sum(h.deposits for h in self.households)
@@ -165,11 +188,12 @@ class SimulationState:
         """从 agent 状态构造 5 个 BS 对象.
 
         Phase 2: 多家银行聚合成单个 BS 校验 (跨部门 SFC).
+        Phase 3: 多家企业逐项求和 (deposits/debt/inventory/capital).
         """
         assert self.bank is not None
         assert self.government is not None
         assert self.central_bank is not None
-        assert self.firm is not None
+        assert self.firms, "state.firms must contain at least one firm"
 
         # 聚合所有银行的余额 (兼容 n_banks=1 和 n_banks>1)
         if self.banks:
@@ -179,6 +203,7 @@ class SimulationState:
             gov_bonds_held = sum(b.gov_bonds_held for b in self.banks)
             interbank_claims = sum(b.interbank_claims for b in self.banks)
             reo_value = sum(b.reo_value for b in self.banks)
+            seized_assets = sum(b.seized_assets for b in self.banks)
             deposits_from_hh = sum(b.deposits_from_hh for b in self.banks)
             deposits_from_firms = sum(b.deposits_from_firms for b in self.banks)
             interbank_debt = sum(b.interbank_debt for b in self.banks)
@@ -192,6 +217,7 @@ class SimulationState:
             gov_bonds_held = self.bank.gov_bonds_held
             interbank_claims = 0.0
             reo_value = self.bank.reo_value
+            seized_assets = self.bank.seized_assets
             deposits_from_hh = self.bank.deposits_from_hh
             deposits_from_firms = self.bank.deposits_from_firms
             interbank_debt = 0.0
@@ -215,11 +241,11 @@ class SimulationState:
                 consumer_loan=sum(h.consumer_loan for h in self.households),
             ),
             "firms": FirmBalanceSheet(
-                cash=self.firm.cash,
-                deposits=self.firm.deposits,
-                inventories=self.firm.inventory,
-                capital_stock=self.firm.capital,
-                bank_loans=self.firm.debt,
+                cash=sum(f.cash for f in self.firms),
+                deposits=sum(f.deposits for f in self.firms),
+                inventories=sum(f.inventory for f in self.firms),
+                capital_stock=sum(f.capital for f in self.firms),
+                bank_loans=sum(f.debt for f in self.firms),
             ),
             "banks": CommercialBankBalanceSheet(
                 reserves=reserves,
@@ -228,6 +254,7 @@ class SimulationState:
                 gov_bonds_held=gov_bonds_held,
                 interbank_claims=interbank_claims,
                 reo_value=reo_value,
+                seized_assets=seized_assets,
                 deposits_from_hh=deposits_from_hh,
                 deposits_from_firms=deposits_from_firms,
                 interbank_debt=interbank_debt,

@@ -8,7 +8,7 @@ from financial_sim.agents.commercial_bank import CommercialBank
 from financial_sim.agents.firm import Firm
 from financial_sim.agents.government import Government
 from financial_sim.agents.household import Household
-from financial_sim.config import SimConfig
+from financial_sim.config import SimConfig, sector_param
 from financial_sim.core.state import SimulationState
 from financial_sim.core.step import monthly_tick
 from financial_sim.expectations.inflation import InflationExpectation
@@ -83,27 +83,57 @@ class Simulation:
             taylor_output_coeff=config.taylor_output_coeff,
         )
 
-        # ── 企业 (贷款融资的营运资金) ──
+        # ── 企业 (贷款融资的营运资金; Phase 3 Week A 多部门列表化) ──
+        # 每部门一家起步 (统计意义的多家异质性留 Week A 后续).
+        # 营运资金与初始就业按部门劳动份额分配, 残差记在第一家 (消费部门),
+        # 保证 Σfirm.debt 与旧单企业口径完全一致 (银行侧镜像逐位相等).
         wage = 1.0
         initial_firm_deposits = float(n_hh) * wage * 2  # 首月工资 + 缓冲
-        firm = Firm(
-            id="firm_0",
-            sector="consumer_goods",
-            productivity=1.0,
-            price=1.0,
-            wage_offered=wage,
-            employees=n_hh,
-            baseline_employees=n_hh,        # 摩擦雇佣目标 = 稳态全员
-            deposits=initial_firm_deposits,
-            debt=initial_firm_deposits,
-            depreciation_rate=config.depreciation_rate,
-            investment_sensitivity=config.investment_sensitivity,
-            calvo_price_prob=config.calvo_price_prob,
-            calvo_markup_target=config.calvo_markup_target,
-            default_equity_threshold=getattr(
-                config, "firm_default_equity_threshold", 0.0
-            ),
-        )
+        labor_shares = config.normalized_labor_shares()
+        sectors = list(getattr(config, "sectors", ["consumer_goods"])) or [
+            "consumer_goods"
+        ]
+        firms: list[Firm] = []
+        allocated_dep = 0.0
+        allocated_emp = 0
+        for si, sector in enumerate(sectors):
+            share = labor_shares.get(sector, 1.0 / len(sectors))
+            last_sector = si == len(sectors) - 1
+            dep = (
+                initial_firm_deposits - allocated_dep
+                if last_sector
+                else round(initial_firm_deposits * share, 10)
+            )
+            emp = (
+                n_hh - allocated_emp if last_sector
+                else int(round(n_hh * share))
+            )
+            firms.append(Firm(
+                id=f"firm_{si}_{sector}",
+                sector=sector,
+                productivity=sector_param(sector, "productivity", 1.0),
+                price=sector_param(sector, "price", 1.0),
+                wage_offered=wage,
+                employees=max(0, emp),
+                baseline_employees=max(0, emp),
+                deposits=dep,
+                debt=dep,
+                depreciation_rate=config.depreciation_rate,
+                investment_sensitivity=config.investment_sensitivity,
+                calvo_price_prob=config.calvo_price_prob,
+                calvo_markup_target=config.calvo_markup_target,
+                production_function=getattr(
+                    config, "production_function", "linear"
+                ),
+                sigma_elasticity=float(getattr(config, "sigma_elasticity", 0.5)),
+                alpha_capital=float(getattr(config, "alpha_capital", 0.3)),
+                default_equity_threshold=getattr(
+                    config, "firm_default_equity_threshold", 0.0
+                ),
+            ))
+            allocated_dep += dep
+            allocated_emp += max(0, emp)
+        firm = firms[0]
 
         # ── 家庭 (异质: 储蓄率/MPC 截断正态; 工资对数正态) ──
         savings_draws = truncated_normal(
@@ -132,6 +162,14 @@ class Simulation:
         ]
         for h in households:
             h.permanent_income = h.wage
+
+        # 初始就业归属: 按企业顺序切分家庭, 写 employer_id (工资支付/失业归属用)
+        hh_cursor = 0
+        for f in firms:
+            for h in households[hh_cursor : hh_cursor + f.employees]:
+                h.sector = f.sector
+                h.employer_id = f.id
+            hh_cursor += f.employees
 
         # ── Phase 2: 住房市场 + 初始房贷 (纯信用创造) ──
         housing = HousingMarket.from_config(config) if bool(
@@ -163,8 +201,9 @@ class Simulation:
 
         # ── 银行: 准备金与资本作为平衡项反解 (命中目标 CAR) ──
         hh_total_deposits = sum(h.deposits for h in households)
-        total_deposits = hh_total_deposits + initial_firm_deposits
-        total_loans = initial_firm_deposits + total_mortgages
+        firm_deposits_actual = sum(f.deposits for f in firms)
+        total_deposits = hh_total_deposits + firm_deposits_actual
+        total_loans = firm_deposits_actual + total_mortgages
         car_target = float(getattr(config, "initial_bank_car", 0.12))
         car_target = min(max(car_target, 0.0), 0.9)
         total_bank_assets = total_deposits / (1.0 - car_target)
@@ -197,11 +236,11 @@ class Simulation:
             )
             banks.append(bank)
 
-        # 主银行持有部门聚合的存贷款
+        # 主银行持有部门聚合的存贷款 (企业侧 = 各企业求和, 镜像逐位一致)
         bank = banks[0]
-        bank.loans_to_firms = initial_firm_deposits
+        bank.loans_to_firms = firm_deposits_actual
         bank.loans_to_households = total_mortgages
-        bank.deposits_from_firms = initial_firm_deposits
+        bank.deposits_from_firms = firm_deposits_actual
         bank.deposits_from_hh = hh_total_deposits
         # 资本 = A − L (主银行单独平衡, 余下银行只放同业敞口)
         bank.capital = bank.total_assets() - bank.total_liabilities()
@@ -255,7 +294,7 @@ class Simulation:
             t=0,
             config=config,
             households=households,
-            firm=firm,
+            firms=firms,
             bank=bank,
             banks=banks,
             government=government,
