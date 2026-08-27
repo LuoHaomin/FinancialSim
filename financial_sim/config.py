@@ -96,8 +96,28 @@ class SimConfig(BaseModel):
     enable_events: bool = True           # 启用事件注入
     preset_shocks: list[str] = Field(default_factory=list)  # 启用的预设冲击名
 
+    # ── Housing (Phase 2) ──
+    enable_housing: bool = True           # 启用住房市场
+    housing_rental_yield_target: float = 0.05  # 房价/租金目标比率 (隐含 cap rate)
+    housing_price_adjust_speed: float = 0.10   # 月度价格调整速度
+    housing_initial_price: float = 120.0      # 初始房价 (自洽: price = rent×12/yield)
+    housing_initial_rent: float = 0.5         # 月租金 (0.5×12/0.05 = 120)
+    housing_ltv_max: float = 0.80             # 最高 LTV
+    housing_initial_ltv: float = 0.70         # 初始抵押组合的平均 LTV
+    housing_mortgage_rate_spread: float = 0.02  # 抵押贷款利率溢价
+    housing_default_ltv_threshold: float = 1.10  # 房贷余额 > 此 LTV → 违约
+
+    # ── Multi-bank (Phase 2) ──
+    n_banks: int = Field(default=1, ge=1)   # 银行数 (默认 1 保持 backward-compat)
+    interbank_core_size: int = 3            # Core-Periphery 网络的核心银行数
+    interbank_link_density: float = 0.5     # Periphery 连接到核心的概率
+
+    # ── Fire-sale (Phase 2) ──
+    fire_sale_price_impact: float = 0.05    # 1 单位抛售压低 X% 的市场价
+    bank_failure_car_threshold: float = 0.04  # CAR < 此值触发处置
+    lolr_rate_spread: float = 0.01          # 最后贷款人利率溢价
+
     # Other settings (legacy)
-    enable_housing: bool = False
     enable_brock_hommes: bool = False
 
     @classmethod

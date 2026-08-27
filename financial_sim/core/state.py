@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from financial_sim.agents.central_bank import CentralBank
 from financial_sim.agents.commercial_bank import CommercialBank
@@ -17,6 +18,10 @@ from financial_sim.monetary.balance_sheets import (
     HouseholdBalanceSheet,
 )
 from financial_sim.utils.logging import get_logger
+
+if TYPE_CHECKING:
+    from financial_sim.markets.housing import HousingMarket
+    from financial_sim.network.interbank import InterbankNetwork
 
 logger = get_logger(__name__)
 
@@ -47,6 +52,8 @@ class SimulationState:
     - 1 个央行
     - N 个家庭 (个体级)
     - 1 个聚合企业 (Phase 1 改为多部门多企业)
+
+    Phase 2: 多银行 + 住房市场 + 同业网络.
     """
 
     t: int = 0
@@ -55,7 +62,8 @@ class SimulationState:
     # ── Agents ──
     households: list[Household] = field(default_factory=list)
     firm: Firm | None = None  # Phase 0: 单一聚合企业
-    bank: CommercialBank | None = None
+    bank: CommercialBank | None = None  # 主银行 (n_banks=1 时为唯一银行, 否则聚合代理)
+    banks: list[CommercialBank] = field(default_factory=list)  # Phase 2: 全部银行
     government: Government | None = None
     central_bank: CentralBank | None = None
 
@@ -83,6 +91,15 @@ class SimulationState:
     # ── 冲击瞬时覆盖 (one-shot 风格, 每月 step 读取) ──
     _gov_spending_multiplier: float = 1.0
     _income_tax_rate_override: float | None = None
+
+    # ── Phase 2: 住房市场 + 同业网络 ──
+    housing_market: HousingMarket | None = None
+    interbank_network: InterbankNetwork | None = None
+    housing_price: float = 200.0          # 房价镜像 (供便捷访问)
+    housing_price_history: list[float] = field(default_factory=list)
+    housing_expectations_factor: float = 1.0  # 房价泡沫因子 (>1 = 投机性溢价)
+    fire_sale_pressure: float = 0.0      # 当前 fire-sale 强度 (0-1)
+    failed_banks: list[str] = field(default_factory=list)  # 已失败银行 ID
 
     # ── 历史 (用于分析与绘图) ──
     macro_history: list[MacroSnapshot] = field(default_factory=list)
@@ -140,11 +157,39 @@ class SimulationState:
     # ════════════════════════════════════════════════════
 
     def build_balance_sheets(self) -> dict[str, object]:
-        """从 agent 状态构造 5 个 BS 对象."""
+        """从 agent 状态构造 5 个 BS 对象.
+
+        Phase 2: 多家银行聚合成单个 BS 校验 (跨部门 SFC).
+        """
         assert self.bank is not None
         assert self.government is not None
         assert self.central_bank is not None
         assert self.firm is not None
+
+        # 聚合所有银行的余额 (兼容 n_banks=1 和 n_banks>1)
+        if self.banks:
+            reserves = sum(b.reserves for b in self.banks)
+            loans_to_firms = sum(b.loans_to_firms for b in self.banks)
+            loans_to_households = sum(b.loans_to_households for b in self.banks)
+            gov_bonds_held = sum(b.gov_bonds_held for b in self.banks)
+            interbank_claims = sum(b.interbank_claims for b in self.banks)
+            deposits_from_hh = sum(b.deposits_from_hh for b in self.banks)
+            deposits_from_firms = sum(b.deposits_from_firms for b in self.banks)
+            interbank_debt = sum(b.interbank_debt for b in self.banks)
+            lolr_debt = sum(b.lolr_debt for b in self.banks)
+            capital = sum(b.capital for b in self.banks)
+        else:
+            # 兼容: 单银行 (Phase 0/1)
+            reserves = self.bank.reserves
+            loans_to_firms = self.bank.loans_to_firms
+            loans_to_households = self.bank.loans_to_households
+            gov_bonds_held = self.bank.gov_bonds_held
+            interbank_claims = 0.0
+            deposits_from_hh = self.bank.deposits_from_hh
+            deposits_from_firms = self.bank.deposits_from_firms
+            interbank_debt = 0.0
+            lolr_debt = 0.0
+            capital = self.bank.capital
 
         return {
             "households": HouseholdBalanceSheet(
@@ -160,22 +205,24 @@ class SimulationState:
                 bank_loans=self.firm.debt,
             ),
             "banks": CommercialBankBalanceSheet(
-                reserves=self.bank.reserves,
-                loans_to_firms=self.bank.loans_to_firms,
-                loans_to_households=self.bank.loans_to_households,
-                gov_bonds_held=self.bank.gov_bonds_held,
-                deposits_from_hh=self.bank.deposits_from_hh,
-                deposits_from_firms=self.bank.deposits_from_firms,
-                capital=self.bank.capital,
+                reserves=reserves,
+                loans_to_firms=loans_to_firms,
+                loans_to_households=loans_to_households,
+                gov_bonds_held=gov_bonds_held,
+                interbank_claims=interbank_claims,
+                deposits_from_hh=deposits_from_hh,
+                deposits_from_firms=deposits_from_firms,
+                interbank_debt=interbank_debt,
+                capital=capital,
             ),
             "government": GovernmentBalanceSheet(
-                treasury_deposits=0,  # Phase 0: 政府无独立账户
-                other_assets=0,
+                treasury_deposits=0,
+                other_assets=self.government.other_assets,
                 bonds_outstanding=self.government.debt,
             ),
             "cb": CentralBankBalanceSheet(
                 gov_bonds=self.central_bank.gov_bonds,
-                lolr_claims=0,
+                lolr_claims=lolr_debt,  # CB 视角: 银行的 LOLR 借款是 CB 资产
                 other_assets=0,
                 bank_reserves=self.central_bank.bank_reserves,
                 currency_issued=self.central_bank.currency_issued,

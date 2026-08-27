@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 完成 ✅ / Phase 1 进行中 (核心行为+金融部门+快照已落地)
+> 状态：Phase 0 ✅ / Phase 1 ✅（核心链路）/ Phase 2 ✅（金融层扩展 + 危机涌现）
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,7 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 131 passed · ruff clean · 48 个月 baseline 零 SFC 违反
+**测试基线**: 199 passed · ruff clean · baseline 与危机场景均零 SFC 违反
 
 ### Phase 0 — 全部完成 ✅
 Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、月度 tick、商品/劳动市场、e2e + 性能测试。
@@ -36,16 +36,48 @@ Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、�
 4. **财政规模失配**: G 从固定金额改为潜在产出比例(45%)自动定标; 稳态校准 ≈ 1 − avg_mpc×(1−τ)。
 5. **SFC 校验容差**: 绝对 1e-6 在 ~1e4 量级下浮点累积误差误报, 改为相对容差。
 
+### Phase 2 已完成（金融层扩展）
+
+| 模块 | 内容 | 文件 |
+|---|---|---|
+| 房产市场 | 租金锚定价 (cap rate) + 利率反馈 + 泡沫/恐慌因子 | `markets/housing.py` |
+| 抵押贷款 | 初始组合发放、等额月供摊销、断供计数器 → NPL → REO | `core/step.py` `_housing_cycle` / `_mortgage_default_check` |
+| 多家商业银行 | n_banks 可配, 主银行语义, Core-Periphery 同业敞口 | `core/simulation.py`, `network/interbank.py` |
+| Fire-sale 外部性 | REO 甩卖按比例压低房价 → 更多负资产 → 违约螺旋 | `step._fire_sale_and_failure` |
+| 银行失败处置 | CAR 阈值触发 → 同业传染 (recovery 40%) → 政府多轮救助注资 | `step._fire_sale_and_failure` |
+| 危机场景 | 2008 型 preset（风险溢价飙升+紧缩）全链路涌现, SFC 全程干净 | `tests/integration/test_crisis.py` |
+
+**危机涌现验证** (seed=7, n=300, 双重风险溢价飙升 + 财政紧缩 + 加息):
+房价 120→~7 (−95%), 抵押核销发生, bank_1 失败, 同业传染, 政府 TARP 式多轮注资
+稳住系统 (CAR 恢复至监管线), 60 个月零 SFC 违反。
+
+### Phase 2 过程中修复的记账/设计问题
+
+1. **快照恢复后账目分裂**: `state.bank` 与 `state.banks[0]` 被还原成两个对象,
+   新旧代码路径各写一个 → SFC 破裂。已修: 单银行时恢复共享实例; 序列化补齐
+   `housing_market`; snapshot 版本升至 v2。
+2. **多银行聚合代理漂移**: `state.bank` 原为一次性聚合副本, 主循环写入它但校验聚合真银行。
+   已改为"主银行语义": `state.bank = banks[0]`, 聚合视图只在 build_balance_sheets 现场求和。
+3. **LOLR 资本清零无对手方**: `bank.capital = 0` 无对应记账。换成完整镜像的政府救助:
+   gov.debt↑R/gov.other_assets↑R ↔ cb.gov_bonds↑R/cb.bank_reserves↑R ↔ bank.reserves↑R/bank.capital↑R。
+4. **同业违约注销漏记**: 债权人扣资本但债权资产未减、债务人负债未注销。
+   补三边记账 (claims↓X + reserves↓0.4X|cap↓0.6X; debtor: debt↓X|reserves↓0.4X|cap↑0.6X)。
+   银行失败期间同业市场冻结 (停止单边结算)。
+5. **违约触发不可达**: 原"负资产+失业>6月"几乎无法同时满足。新增断供计数器
+   (连续 miss ≥3 月即触发), 经济含义更贴近现实。
+6. **房价初始参数不自洽**: price=200 vs rent 锚定目标 2400 → 必然长期上涨。
+   校准为 price=120, rent=0.5, yield=5% (三者自洽); 新增 `housing_initial_ltv`。
+
 ### Phase 1 待办（按计划顺序）
 
-- [ ] Week 3-4 尾巴: 多部门 firms / CES 生产（Phase 2 备选）
-- [ ] Week 5: Stiglitz-Weiss 信贷配给 + LTV/DTI（家庭信贷市场）
-- [ ] Week 6: Brock-Hommes 股票市场 + 债券期限结构 + ShockEvent 事件系统
-- [ ] Week 7: PerfMonitor 埋点 (现有 performance 测试为基础加强)
-- [ ] Week 8: 7 个 stylized facts 校准测试套件 + scenarios/*.yaml 场景库
-- [ ] 失业机制: 目前劳动市场"雇所有人"→失业率恒 0, 需求侧雇佣决策引入摩擦失业
+- [ ] Week 5: Stiglitz-Weiss 信贷配给 + LTV/DTI（家庭消费信贷, 区别于房贷）
+- [ ] Week 6: Brock-Hommes 股票市场 + 债券期限结构
+- [x] ~~ShockEvent 事件系统~~ ✅ (Phase 1 late: events.py + 9 个预设)
+- [x] ~~失业机制 / 劳动摩擦~~ ✅ (Phase 1 late commit)
+- [x] ~~stylized facts 校准套件~~ ✅ (Phase 1 late: tests/calibration)
+- [ ] Week 8: scenarios/*.yaml 场景库 (含 2008 crisis 场景配置化)
 
-### 已知建模限制（有意简化, 二期修正）
+### 已知建模限制（有意简化, 三期修正）
 
 - 企业投资不消耗金融资源（隐含留存利润实物化假设）
 - 财政赤字 100% 由 CB 承接（无私人部门持债渠道）

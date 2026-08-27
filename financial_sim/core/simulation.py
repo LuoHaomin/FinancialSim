@@ -12,6 +12,8 @@ from financial_sim.config import SimConfig
 from financial_sim.core.state import SimulationState
 from financial_sim.core.step import monthly_tick
 from financial_sim.expectations.inflation import InflationExpectation
+from financial_sim.markets.housing import HousingMarket
+from financial_sim.network.interbank import InterbankNetwork
 from financial_sim.simulation.events import EventManager, build_event_manager
 from financial_sim.simulation.rng import RNGManager
 from financial_sim.utils.distributions import truncated_normal
@@ -62,17 +64,50 @@ class Simulation:
         cb.gov_bonds = initial_reserves
         cb.bank_reserves = initial_reserves
 
-        # ── 银行 ──
-        bank = CommercialBank(
-            id="bank_1",
-            reserves=initial_reserves,
-            capital=initial_reserves,
-            car_requirement=config.car_requirement,
-            car_buffer=config.car_buffer,
-            loan_rate_base_spread=config.loan_rate_base_spread,
-            loan_rate_car_pressure=config.loan_rate_car_pressure,
-            deposit_rate_margin=config.deposit_rate_margin,
-        )
+        # ── 银行 (Phase 2: 多家 + 同业网络) ──
+        n_banks = max(1, int(getattr(config, "n_banks", 1)))
+        banks: list[CommercialBank] = []
+        # 平分初始准备金给各银行 (保持 SFC)
+        per_bank_reserves = initial_reserves / n_banks
+        per_bank_capital = initial_reserves / n_banks
+        for b_idx in range(n_banks):
+            bank = CommercialBank(
+                id=f"bank_{b_idx + 1}",
+                tier=1 if b_idx < int(getattr(config, "interbank_core_size", 3)) else 2,
+                reserves=per_bank_reserves,
+                capital=per_bank_capital,
+                car_requirement=config.car_requirement,
+                car_buffer=config.car_buffer,
+                loan_rate_base_spread=config.loan_rate_base_spread,
+                loan_rate_car_pressure=config.loan_rate_car_pressure,
+                deposit_rate_margin=config.deposit_rate_margin,
+                mortgage_rate_spread=getattr(config, "housing_mortgage_rate_spread", 0.02),
+            )
+            banks.append(bank)
+
+        # 同业网络 (Phase 2)
+        interbank: InterbankNetwork | None = None
+        if n_banks > 1:
+            nw_rng = self.rng.stream("interbank_init")
+            interbank = InterbankNetwork.build_core_periphery(
+                bank_ids=[b.id for b in banks],
+                core_size=int(getattr(config, "interbank_core_size", 3)),
+                link_density=float(getattr(config, "interbank_link_density", 0.5)),
+                avg_exposure=initial_reserves * 0.05 / max(1, n_banks),
+                rng=nw_rng,
+            )
+            # 把敞口记到各银行账目
+            for (creditor_id, debtor_id), amount in interbank.exposures.items():
+                creditor = next(b for b in banks if b.id == creditor_id)
+                debtor = next(b for b in banks if b.id == debtor_id)
+                creditor.interbank_claims += amount
+                debtor.interbank_debt += amount
+
+        # 主银行引用: 恒为 banks[0] (主银行语义).
+        # 多银行时所有"面向部门聚合"的资金流 (工资/消费/政府/税收) 都记在
+        # banks[0]; 其余银行只参与同业网络与逐银行政策. 聚合视图由
+        # build_balance_sheets 现场求和, 不再维护虚拟代理对象.
+        bank = banks[0]
 
         # ── 政府 ──
         government = Government(
@@ -150,12 +185,66 @@ class Simulation:
         ):
             em = build_event_manager(config.preset_shocks)
 
+        # ── Phase 2: 住房市场 ──
+        housing = HousingMarket.from_config(config) if bool(
+            getattr(config, "enable_housing", True)
+        ) else None
+        if housing is not None:
+            # 初始化家庭住房持有: 一户一套自住房 (全款, 无房贷)
+            # 简化: 房屋视为"已存在的资产", 不通过银行账目融资
+            # 房贷机制仅在 _mortgage_default_check 中以"动态发放"形式出现
+            for h in households:
+                h.housing_units = 1
+                h.mortgage_balance = 0.0  # 初始无房贷
+                h.mortgage_rate = (
+                    config.cb_policy_rate_initial
+                    + housing.mortgage_rate_spread
+                )
+
+            # 给一部分家庭 (按存款分布) 发放初始抵押贷款, 以启动 mortgage channel
+            # 资金来源: 银行用 CB 注入的准备金发放 (SFC-balanced)
+            initial_mortgage_ltv = float(
+                getattr(config, "housing_initial_ltv", 0.70)
+            )
+            total_mortgages = 0.0
+            # 选择存款较多的一半家庭 (按存款降序)
+            sorted_hh = sorted(
+                households, key=lambda h: h.deposits, reverse=True
+            )
+            eligible = sorted_hh[: n_hh // 2]
+            for h in eligible:
+                mortgage = housing.price * initial_mortgage_ltv
+                h.mortgage_balance = mortgage
+                # HH 拿到现金 (买房首付已被假设支付, 现金进入存款)
+                # 这里简化为: mortgage 直接进 HH 存款 (隐含"再融资"提取)
+                h.deposits += mortgage
+                total_mortgages += mortgage
+
+            # 银行端镜像 (SFC 严格分账)
+            # 机制: CB 通过 OMO 向银行注入准备金 → 银行获得资金发放贷款
+            #   bank.A += reserves (从 CB); bank.A += loans_to_hh; bank.L += deposits
+            #   → bank.A - bank.L - bank.capital 必须守恒
+            # 解法: 注入时 bank.capital 同步增加 (CB 的资本注入, 类似 QE)
+            if banks and total_mortgages > 0:
+                bank0 = banks[0]
+                bank0.loans_to_households = total_mortgages
+                # CB OMO: 准备金注入 + 等额资本注入 (SFC 平衡)
+                cb.gov_bonds += total_mortgages
+                cb.bank_reserves += total_mortgages
+                bank0.reserves += total_mortgages
+                bank0.capital += total_mortgages  # 关键: 资本同步增
+                # HH 存款增加 → bank.deposits_from_hh 同步增加
+                bank0.deposits_from_hh += total_mortgages
+                # 政府债务 (OMO 购债 = 政府"卖给"CB)
+                government.debt += total_mortgages
+
         return SimulationState(
             t=0,
             config=config,
             households=households,
             firm=firm,
             bank=bank,
+            banks=banks,
             government=government,
             central_bank=cb,
             real_gdp=0.0,
@@ -169,6 +258,9 @@ class Simulation:
             ),
             rng_manager=self.rng,
             event_manager=em,
+            housing_market=housing,
+            housing_price=housing.price if housing else 200.0,
+            interbank_network=interbank,
         )
 
     # ════════════════════════════════════════════════════════════
@@ -200,3 +292,25 @@ class Simulation:
         """重置到初始状态 (同 seed 完全复现)."""
         self.rng.reset()
         self.state = self._build_state(self.config)
+
+
+# ════════════════════════════════════════════════════════════
+# 多银行聚合视图 (仅用于报告; 校验在 build_balance_sheets 现场求和)
+# ════════════════════════════════════════════════════════════
+def _aggregate_banks(banks: list[CommercialBank]) -> CommercialBank:
+    """把所有银行聚合成一个虚拟银行 (只读视图, 不可用于记账!)."""
+    agg = CommercialBank(id="agg_bank", tier=1)
+    agg.reserves = sum(b.reserves for b in banks)
+    agg.loans_to_firms = sum(b.loans_to_firms for b in banks)
+    agg.loans_to_households = sum(b.loans_to_households for b in banks)
+    agg.gov_bonds_held = sum(b.gov_bonds_held for b in banks)
+    agg.interbank_claims = sum(b.interbank_claims for b in banks)
+    agg.deposits_from_hh = sum(b.deposits_from_hh for b in banks)
+    agg.deposits_from_firms = sum(b.deposits_from_firms for b in banks)
+    agg.interbank_debt = sum(b.interbank_debt for b in banks)
+    agg.lolr_debt = sum(b.lolr_debt for b in banks)
+    agg.capital = sum(b.capital for b in banks)
+    agg.npl_amount = sum(b.npl_amount for b in banks)
+    agg.npl_writes_off_cumulative = sum(b.npl_writes_off_cumulative for b in banks)
+    agg.npl_mortgages = sum(b.npl_mortgages for b in banks)
+    return agg

@@ -22,13 +22,14 @@ from financial_sim.config import SimConfig
 from financial_sim.core.simulation import Simulation
 from financial_sim.core.state import MacroSnapshot
 from financial_sim.expectations.inflation import InflationExpectation
+from financial_sim.markets.housing import HousingMarket
 
 
 class SnapshotError(Exception):
     """快照版本不匹配或损坏."""
 
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 _AGENT_TYPES = {
     "household": Household,
@@ -67,6 +68,11 @@ class StateSnapshot:
             "households": [_to_dict(h) for h in state.households],
             "firm": _to_dict(state.firm) if state.firm else None,
             "bank": _to_dict(state.bank) if state.bank else None,
+            "banks": [_to_dict(b) for b in state.banks],  # Phase 2: multi-bank
+            "housing_market": (
+                _to_dict(state.housing_market)
+                if getattr(state, "housing_market", None) else None
+            ),
             "government": _to_dict(state.government) if state.government else None,
             "cb": _to_dict(state.central_bank) if state.central_bank else None,
             "inflation_expectation": (
@@ -81,6 +87,11 @@ class StateSnapshot:
             "unemployment_rate": state.unemployment_rate,
             "potential_gdp": state.potential_gdp,
             "output_gap": state.output_gap,
+            "housing_price": state.housing_price,
+            "housing_price_history": state.housing_price_history,
+            "housing_expectations_factor": state.housing_expectations_factor,
+            "fire_sale_pressure": state.fire_sale_pressure,
+            "failed_banks": state.failed_banks,
         }
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,8 +115,25 @@ class StateSnapshot:
         ]
         if payload["firm"]:
             state.firm = _from_dict(payload["firm"], Firm)  # type: ignore[arg-type]
-        if payload["bank"]:
-            state.bank = _from_dict(payload["bank"], CommercialBank)  # type: ignore[arg-type]
+        # Phase 2: 还原 multi-bank 列表
+        if "banks" in payload and payload["banks"]:
+            state.banks = [
+                _from_dict(b, CommercialBank)  # type: ignore[arg-type]
+                for b in payload["banks"]
+            ]
+        # 别名一致性: n_banks=1 时 state.bank 与 state.banks[0] 必须同一实例,
+        # 否则不同代码路径写不同引用 → SFC 恒等式破裂.
+        if len(state.banks) == 1 and payload["bank"]:
+            state.bank = state.banks[0]
+        elif payload["bank"]:
+            state.bank = _from_dict(  # type: ignore[arg-type]
+                payload["bank"], CommercialBank
+            )
+        # ── Phase 2: 住房市场 ──
+        if payload.get("housing_market"):
+            state.housing_market = _from_dict(  # type: ignore[arg-type]
+                payload["housing_market"], HousingMarket
+            )
         if payload["government"]:
             state.government = _from_dict(  # type: ignore[arg-type]
                 payload["government"], Government
@@ -131,4 +159,15 @@ class StateSnapshot:
         state.unemployment_rate = payload["unemployment_rate"]
         state.potential_gdp = payload["potential_gdp"]
         state.output_gap = payload["output_gap"]
+        # ── Phase 2: 住房 + fire-sale 状态 ──
+        if "housing_price" in payload:
+            state.housing_price = payload["housing_price"]
+        if "housing_price_history" in payload:
+            state.housing_price_history = payload["housing_price_history"]
+        if "housing_expectations_factor" in payload:
+            state.housing_expectations_factor = payload["housing_expectations_factor"]
+        if "fire_sale_pressure" in payload:
+            state.fire_sale_pressure = payload["fire_sale_pressure"]
+        if "failed_banks" in payload:
+            state.failed_banks = payload["failed_banks"]
         return sim

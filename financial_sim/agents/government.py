@@ -31,6 +31,9 @@ class Government:
     # ── 债务 ──
     debt: float = 0.0
 
+    # ── 资产 (Phase 2: 救助银行形成的股权/债权) ──
+    other_assets: float = 0.0
+
     # ── 流量 ──
     tax_revenue: float = 0.0
     gov_spending: float = 0.0  # Phase 0 关闭

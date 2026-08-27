@@ -95,6 +95,12 @@ PRESET_SHOCKS: dict[str, dict[str, Any]] = {
     "energy_shock_plus30p": {
         "channel": "energy_price", "magnitude": 0.30, "duration": 12, "one_shot": False,
     },
+    # 住房: 抵押贷款风险溢价飙升 (2008 型场景核心冲击; yield +4pp 一步到位,
+    # 房价经 revalue() 锚定机制逐步向新基本面回归)
+    "housing_risk_premium_spike": {
+        "channel": "housing_yield_target", "magnitude": 0.04,
+        "duration": 1, "one_shot": True,
+    },
 }
 
 
@@ -173,6 +179,10 @@ class EventManager:
             elif ev.channel == "energy_price":
                 # 替换: 一个能源冲击替换 productivity 倍率
                 effects["energy_price_mult"] = 1.0 / (1.0 + ev.magnitude)
+            elif ev.channel == "housing_yield_target":
+                effects["housing_yield_delta"] = (
+                    effects.get("housing_yield_delta", 0.0) + ev.magnitude
+                )
             else:
                 logger.warning(f"Unknown shock channel: {ev.channel} (skipped)")
         return effects
@@ -200,6 +210,12 @@ class EventManager:
             if firm is not None:
                 # 注意: 这是简化的"一次性"应用; 持续冲击会逐月乘以 mult
                 firm.productivity *= effects["energy_price_mult"]
+        if "housing_yield_delta" in effects:
+            housing = getattr(state, "housing_market", None)
+            if housing is not None:
+                # 风险溢价重定价是持久性水平移动: 直接上调目标 cap rate.
+                # revalue() 用 rental_yield_target 作锚 → 永久压低房价路径.
+                housing.rental_yield_target += effects["housing_yield_delta"]
 
     # ── 状态读取 ──
 

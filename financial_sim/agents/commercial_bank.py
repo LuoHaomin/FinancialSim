@@ -18,19 +18,23 @@ from dataclasses import dataclass
 
 @dataclass
 class CommercialBank:
-    """商业银行 agent (Phase 1: 单一聚合银行)."""
+    """商业银行 agent (Phase 2: 多家 + 抵押贷款 + 同业)."""
 
     id: str = "bank_1"
+    tier: int = 1                        # 1=核心, 2=外围 (Phase 2 网络结构)
 
     # ── 资产 ──
     reserves: float = 0.0
     loans_to_firms: float = 0.0
-    loans_to_households: float = 0.0
+    loans_to_households: float = 0.0      # 包括抵押贷款 (Phase 2)
     gov_bonds_held: float = 0.0
+    interbank_claims: float = 0.0         # 同业拆出 (Phase 2)
 
     # ── 负债 ──
     deposits_from_hh: float = 0.0
     deposits_from_firms: float = 0.0
+    interbank_debt: float = 0.0           # 同业拆入 (Phase 2)
+    lolr_debt: float = 0.0                # 最后贷款人债务 (Phase 2)
 
     # ── 资本 ──
     capital: float = 0.0
@@ -38,6 +42,12 @@ class CommercialBank:
     # ── Phase 1+: NPL 跟踪 ──
     npl_amount: float = 0.0              # 不良贷款余额
     npl_writes_off_cumulative: float = 0.0  # 累计核销 (用于报告)
+    npl_mortgages: float = 0.0            # 抵押贷款不良 (Phase 2)
+
+    # ── Phase 2: 状态标志 ──
+    is_failed: bool = False
+    months_since_failure: int = 0
+    reo_properties: int = 0               # 银行持有 (止赎) 房产数量
 
     # ── 监管/定价参数 ──
     car_requirement: float = 0.08
@@ -45,6 +55,7 @@ class CommercialBank:
     loan_rate_base_spread: float = 0.03
     loan_rate_car_pressure: float = 0.5
     deposit_rate_margin: float = -0.02
+    mortgage_rate_spread: float = 0.02   # 抵押贷款利率相对政策利率的溢价 (Phase 2)
 
     # ── 计算方法 ──
 
@@ -54,10 +65,16 @@ class CommercialBank:
             + self.loans_to_firms
             + self.loans_to_households
             + self.gov_bonds_held
+            + self.interbank_claims
         )
 
     def total_liabilities(self) -> float:
-        return self.deposits_from_hh + self.deposits_from_firms
+        return (
+            self.deposits_from_hh
+            + self.deposits_from_firms
+            + self.interbank_debt
+            + self.lolr_debt
+        )
 
     def car(self) -> float:
         """资本充足率 = capital / total_assets (简化: 未做风险加权)."""
@@ -130,6 +147,28 @@ class CommercialBank:
         self.capital -= actual  # 损失直接侵蚀资本
         self.npl_writes_off_cumulative += actual
         return actual
+
+    # ── Phase 2: 抵押贷款 NPL & 违约 ──
+
+    def write_off_mortgage(self, amount: float) -> float:
+        """核销抵押贷款: loans_to_households 减, capital 减, npl_mortgages 减.
+
+        与 write_off_loan 类似, 但针对抵押贷款账户.
+        """
+        if amount <= 0:
+            return 0.0
+        actual = min(amount, self.npl_mortgages, self.loans_to_households)
+        if actual <= 0:
+            return 0.0
+        self.loans_to_households -= actual
+        self.npl_mortgages = max(0.0, self.npl_mortgages - actual)
+        self.capital -= actual  # 损失直接侵蚀资本
+        self.npl_writes_off_cumulative += actual
+        return actual
+
+    def is_under_capitalized(self, threshold: float) -> bool:
+        """CAR 低于阈值 (Phase 2 失败门槛)."""
+        return self.car() < threshold
 
 
 __all__ = ["CommercialBank"]

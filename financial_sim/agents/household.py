@@ -26,6 +26,9 @@ class Household:
     - permanent_income: 收入的指数滑动平均 (消费基准)
     - savings_rate / mpc: 异质行为参数
     - wealth_effect_coef λ: 每单位超额财富拉动的边际消费
+    - housing_units: 自住/投资房数量 (Phase 2)
+    - mortgage_balance: 房贷余额 (Phase 2)
+    - rental_income: 当月收到的租金 (Phase 2)
     """
 
     id: str
@@ -51,6 +54,13 @@ class Household:
     wealth_effect_coef: float = 0.0       # 默认 0 → 与 Phase 0 完全一致
     wealth_buffer_months: float = 3.0     # 前 N 个月永久收入视为"缓冲", 不拉动消费
 
+    # ── Phase 2: 住房 + 抵押贷款 ──
+    housing_units: int = 0                 # 持有的住房数量 (自住 1 + 投资 N)
+    mortgage_balance: float = 0.0          # 房贷余额
+    mortgage_rate: float = 0.0             # 房贷利率 (锁定)
+    rental_income: float = 0.0             # 当月租金收入
+    mortgage_missed_payments: int = 0      # 连续错过月供次数 (断供压力计)
+
     def decide_consumption(self) -> float:
         """消费决策: c = mpc·Y^perm + λ·max(0, NW − buffer·Y^perm).
 
@@ -75,8 +85,26 @@ class Household:
         self.permanent_income += a * (self.income - self.permanent_income)
 
     def net_worth(self) -> float:
-        """净资产 = 现金 + 存款 (Phase 1 尚无股票/房产/负债)."""
-        return self.cash + self.deposits
+        """净资产 = 现金 + 存款 (Phase 1) + 房屋净值 (Phase 2).
+
+        Phase 2 简化为不考虑房价: house equity = housing_units × price − mortgage
+        调用方需先更新 housing_price 才能反映真实净值. 此处不取价格依赖,
+        避免循环导入; step 层在房价更新后调用 net_worth().
+        """
+        return self.cash + self.deposits - self.mortgage_balance
+
+    def housing_equity(self, housing_price: float) -> float:
+        """房屋净值 = 房价 × 数量 − 房贷余额."""
+        return housing_price * self.housing_units - self.mortgage_balance
+
+    def mortgage_payment(self) -> float:
+        """月供 (本息). 假设 N=30 年期 (360 月)."""
+        if self.mortgage_balance <= 0 or self.mortgage_rate <= 0:
+            return 0.0
+        r = self.mortgage_rate / 12.0
+        n = 360
+        # 标准等额本息: P × r / (1 - (1+r)^-n)
+        return self.mortgage_balance * r / (1.0 - (1.0 + r) ** (-n))
 
     # ── 就业状态管理 ──
 

@@ -163,6 +163,8 @@ class TestDefaultResolutionE2E:
         # 银行镜像 (SFC): bank.deposits_from_firms=0, bank.loans_to_firms=300
         sim.state.bank.deposits_from_firms = 0
         sim.state.bank.loans_to_firms = 300
+        # 记录初始资本 (Phase 2 OMO 注入了等额资本, 初始 capital 更高)
+        initial_capital = sim.state.bank.capital
 
         _default_resolution(sim.state)
 
@@ -171,9 +173,8 @@ class TestDefaultResolutionE2E:
         # recovered = 100 * 0.5 = 50 → firm.deposits
         # repayment = min(300, 50) = 50; unpaid = 250
         # write_off_loan(250): loans -= 250, capital -= 250
-        # (初始 bank.capital = 100, 核销 250 → 最终 capital = -150)
         assert sim.state.bank.npl_writes_off_cumulative == 250
-        assert sim.state.bank.capital == pytest.approx(-150)
+        assert sim.state.bank.capital == pytest.approx(initial_capital - 250)
         assert sim.state.bank.npl_amount == 0  # 核销后 NPL 余额清零
         assert sim.state.bank.loans_to_firms == pytest.approx(0)  # 全额核销: 250 写 + 50 还
 

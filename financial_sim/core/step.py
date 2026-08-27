@@ -56,9 +56,13 @@ def monthly_tick(
     if _cfg(state, "calvo_price_prob", 0.0):
         _maybe_calvo_pricing(state, goods_market)
     _bank_cycle(state)
+    _housing_cycle(state)                 # Phase 2: 抵押 + 房租 + 价格
     _government_cycle(state)
     _firm_capital_cycle(state)
-    _default_resolution(state)  # Phase 1+: 违约检测 + 处置 + 恢复
+    _default_resolution(state)            # Phase 1+: 违约检测 + 处置 + 恢复
+    _mortgage_default_check(state)        # Phase 2: 房贷违约 → 银行 NPL
+    _interbank_cycle(state)               # Phase 2: 同业利息 (n_banks>1 时生效)
+    _fire_sale_and_failure(state)         # Phase 2: fire-sale + 失败处置
     _aggregate_macros(state)
     _validate_sfc(state)
 
@@ -463,3 +467,335 @@ def _validate_sfc(state: SimulationState) -> None:
     if errors:
         logger.warning(f"SFC violations at tick {state.t}: {errors}")
         state.sfc_violations.append(errors)
+
+
+# ════════════════════════════════════════════════════════════
+# Phase 2: Housing + Mortgage + Interbank + Fire-sale
+# ════════════════════════════════════════════════════════════
+
+
+def _housing_cycle(state: SimulationState) -> None:
+    """Phase 2 住房周期: 抵押月供 + 房租收入 + 房价调整 + 泡沫因子演化.
+
+    SFC 注记 (严格分账):
+    - 月供 m = 利息 + 本金
+      - HH: deposits -= m, mortgage_balance -= principal
+      - 银行: deposits_from_hh -= m, loans_to_households -= principal, capital += interest
+      - A: loans -= principal; L: deposits -= m; capital: +(m − principal) ✓
+    - 房租: 投资房收 → 租户付 (HH 内部转账, SFC 自平衡)
+    """
+    housing = state.housing_market
+    if housing is None or state.central_bank is None:
+        return
+
+    bank = state.bank  # 主银行 (n_banks=1 时为唯一)
+    if bank is None:
+        return
+
+    cb = state.central_bank
+
+    # 1. 月供 (利息 → 银行资本; 本金 → 减少按揭余额) + 断供计数
+    for h in state.households:
+        if h.mortgage_balance <= 0:
+            continue
+        # 简化直线摊销: 利息 = balance × rate/12; 本金 = balance / 360
+        interest = h.mortgage_balance * h.mortgage_rate / 12.0
+        principal = h.mortgage_balance / 360.0
+        due = interest + principal
+        affordable = max(0.0, h.deposits)
+        if affordable >= due * 0.999:
+            h.mortgage_missed_payments = 0
+        else:
+            h.mortgage_missed_payments += 1  # 断供压力计
+        payment = min(due, affordable)
+        if payment <= 0:
+            continue
+        # 分配: 先付利息 (银行收入), 再付本金
+        interest_paid = min(interest, payment)
+        principal_paid = payment - interest_paid
+        # 镜像记账
+        h.deposits -= payment
+        bank.deposits_from_hh -= payment
+        h.mortgage_balance -= principal_paid
+        bank.loans_to_households = max(
+            0.0, bank.loans_to_households - principal_paid
+        )
+        bank.capital += interest_paid  # 利息是银行资本增长
+
+    # 2. 房租收入 (HH 内部转账, SFC 自平衡: 双方均镜像银行账目)
+    rental_yield = housing.rent  # 月租金
+    landlords = [h for h in state.households if h.housing_units > 1]
+    if landlords and rental_yield > 0:
+        total_rent = sum(
+            (h.housing_units - 1) * rental_yield for h in landlords
+        )
+        # 收方: 房东存款 ↑, bank.deposits_from_hh ↑
+        for h in landlords:
+            rent_received = (h.housing_units - 1) * rental_yield
+            h.deposits += rent_received
+            h.rental_income = rent_received
+            bank.deposits_from_hh += rent_received
+        # 付方: 所有租户 (housing_units == 1) 平摊, bank.deposits_from_hh ↓
+        renters = [h for h in state.households if h.housing_units <= 1]
+        if renters:
+            per_renter = total_rent / len(renters)
+            for h in renters:
+                h.deposits -= per_renter
+                bank.deposits_from_hh -= per_renter
+
+    # 3. 房价调整 (租金锚定 + 利率反馈 + 泡沫因子)
+    housing.revalue(policy_rate=cb.policy_rate,
+                    expectations_factor=state.housing_expectations_factor)
+
+    # 4. 泡沫因子自适应
+    if len(state.housing_price_history) >= 6:
+        recent_growth = (
+            state.housing_price / state.housing_price_history[-6] - 1
+        )
+        if recent_growth > 0.05:
+            state.housing_expectations_factor = min(
+                1.5, state.housing_expectations_factor + 0.03
+            )
+        elif recent_growth < -0.05:
+            state.housing_expectations_factor = max(
+                0.6, state.housing_expectations_factor - 0.08
+            )
+
+    state.housing_price = housing.price
+    state.housing_price_history.append(housing.price)
+
+
+def _mortgage_default_check(state: SimulationState) -> None:
+    """Phase 2: 房贷违约检查.
+
+    触发: housing_value < mortgage_balance × default_ltv_threshold
+          (即 LTV > 110% → 负资产 → 失业 + 高 LTV 双重打击)
+    """
+    housing = state.housing_market
+    if housing is None:
+        return
+
+    bank = state.bank
+    if bank is None:
+        return
+
+    npl_marked = 0.0
+    missed_threshold = int(_cfg(state, "mortgage_missed_payment_limit", 3))
+    for h in state.households:
+        if h.mortgage_balance <= 0 or h.housing_units <= 0:
+            continue
+        house_value = h.housing_units * housing.price
+        ltv = h.mortgage_balance / house_value if house_value > 0 else float("inf")
+        # 双触发: (a) 负资产 + 连续断供 ≥ N 月; (b) 负资产 + 长期失业 > 6 月
+        underwater = ltv > housing.default_ltv_threshold
+        payment_stress = h.mortgage_missed_payments >= missed_threshold
+        long_unemployed = (not h.employed) and h.unemployment_duration > 6
+        if underwater and (payment_stress or long_unemployed):
+            # 标记 NPL: 房贷余额全额转入 npl_mortgages
+            npl_amount = h.mortgage_balance
+            bank.npl_mortgages += npl_amount
+            bank.mark_npl(npl_amount)
+            npl_marked += npl_amount
+
+            # 银行收回房产 → 计入 reo_properties (估值按当前房价 × 0.7 清算折扣)
+            bank.reo_properties += h.housing_units
+            # 立即核销: 贷款消失, capital 减
+            written = bank.write_off_mortgage(npl_amount)
+            # 银行的"实物资产"= REO, 但 BS 模型不直接追踪; 通过 capital 减少反映损失
+            # 同时 HH.mortgage_balance 归零 (但 h.housing_units 也归零)
+            h.mortgage_balance = 0
+            h.housing_units = 0
+            logger.info(
+                f"  Mortgage default: HH {h.id}, LTV={ltv:.2f}, "
+                f"written off {written:.2f}"
+            )
+
+    # 银行累计 REO 在 fire-sale 阶段会被折价清算
+    if npl_marked > 0:
+        # fire-sale 压力与待售 REO 数量成正比 (简化)
+        state.fire_sale_pressure = min(
+            1.0, state.fire_sale_pressure + bank.reo_properties * 0.001
+        )
+
+
+def _interbank_cycle(state: SimulationState) -> None:
+    """Phase 2 同业利息结算 (n_banks=1 时为空操作).
+
+    简化: 每家银行支付同业负债利息, 收到同业资产利息; 净额入 capital.
+    不重塑 interbank_network 结构 (敞口是给定的存量).
+    """
+    if state.interbank_network is None or len(state.banks) <= 1:
+        return
+
+    # 银行失败期间同业市场冻结 (对手方风险 → 停止结算), 保证聚合恒等式:
+    # 若部分银行不参与, 单边确认的利息会破坏 A = L + capital.
+    if any(b.is_failed for b in state.banks):
+        return
+
+    cb_rate = state.central_bank.policy_rate if state.central_bank else 0.02
+    # 简化: 同业利率 = policy_rate (隐含同业市场贴近政策利率)
+    for bank in state.banks:
+        if bank.is_failed:
+            continue
+        # 收利息 (同业拆出)
+        interest_in = bank.interbank_claims * cb_rate / 12.0
+        bank.capital += interest_in
+        # 付利息 (同业拆入)
+        interest_out = bank.interbank_debt * cb_rate / 12.0
+        bank.capital -= interest_out
+
+
+def _fire_sale_and_failure(state: SimulationState) -> None:
+    """Phase 2 fire-sale externality + 银行失败处置.
+
+    机制 (Brunnermeier-Pedersen 2009 简化版):
+    1. 银行 CAR 低于阈值 → 触发处置
+    2. 失败银行:
+       a. 同业债权人按 recovery_rate 承担损失 (interbank_cycle 的下一 tick 体现)
+       b. 剩余资产 (主要是 gov_bonds) 在 fire-sale 压力下折价卖出
+       c. REO 房产在 fire-sale 压力下推向市场, 压低房价
+       d. 银行被关闭, 资本归零 (extreme)
+    3. fire-sale 价格影响: 房价被压低 → 其他银行的抵押贷款价值下跌
+       → 其他银行 NPL 上升 → 危机传染
+
+    SFC 注记: 失败银行的资产清算 → 资金回笼但资本损失. 极端处置
+    下, 银行 capital 可为负 (Phase 3 处置回收).
+    """
+    # ── 0. REO 甩卖外部性 (单/多银行模式均生效) ──
+    # 银行持有的止赎房产推向市场, 按比例压低房价 (Brunnermeier-Pedersen 简化).
+    # 房产不在任何货币账目上, 清算只影响价格参数与 REO 计数, SFC 中性.
+    housing_mkt = getattr(state, "housing_market", None)
+    reo_total = sum(b.reo_properties for b in state.banks)
+    if housing_mkt is not None and reo_total > 0:
+        impact_cfg = float(_cfg(state, "fire_sale_price_impact", 0.05))
+        impact = impact_cfg * min(1.0, reo_total / max(1, housing_mkt.total_units))
+        impact = min(impact, 0.20)  # 单月最多压价 20%
+        housing_mkt.price *= 1.0 - impact
+        for b in state.banks:
+            b.reo_properties = 0  # 已清算完毕
+        state.fire_sale_pressure = min(
+            1.0, state.fire_sale_pressure + 0.1
+        )
+        logger.info(
+            f"  Fire-sale: {reo_total} REO units liquidated, "
+            f"price -{impact:.1%}"
+        )
+    else:
+        state.fire_sale_pressure = max(0.0, state.fire_sale_pressure - 0.02)
+
+    if len(state.banks) <= 1:
+        return  # 单银行模式不模拟银行失败 (与 Phase 0 一致)
+
+    threshold = float(_cfg(state, "bank_failure_car_threshold", 0.04))
+    failed_this_tick: list[str] = []
+
+    for bank in state.banks:
+        # ── 首次失败判定 (只触发一次) ──
+        if not bank.is_failed and bank.is_under_capitalized(threshold):
+            bank.is_failed = True
+            bank.months_since_failure = 0
+            failed_this_tick.append(bank.id)
+            state.failed_banks.append(bank.id)
+            logger.warning(
+                f"Bank FAILED at t={state.t}: {bank.id}, "
+                f"CAR={bank.car():.3f}, capital={bank.capital:.2f}"
+            )
+
+            # 处置: 同业敞口清算
+            # 记账 (违约注销的三边镜像):
+            #   - 失败银行: interbank_debt 全额注销; 以准备金偿付 recovery 部分;
+            #     注销的净债务转为权益 (discharge gain)
+            #   - 债权人:   interbank_claims 全额冲减; 收到 recovery 现金;
+            #     损失部分侵蚀资本
+            if state.interbank_network is not None:
+                losses = state.interbank_network.apply_failure(
+                    bank.id, recovery_rate=0.4
+                )
+                recovery_rate = 0.4
+                total_exposure = 0.0
+                for creditor_id, loss in losses.items():
+                    creditor = next(
+                        (b for b in state.banks if b.id == creditor_id), None
+                    )
+                    if creditor is None or creditor.is_failed:
+                        continue
+                    exposure = loss / max(1e-9, 1.0 - recovery_rate)
+                    total_exposure += exposure
+                    creditor.interbank_claims = max(
+                        0.0, creditor.interbank_claims - exposure
+                    )
+                    payback = min(exposure * recovery_rate, bank.reserves)
+                    creditor.reserves += payback
+                    creditor.capital -= loss
+                    logger.info(
+                        f"  Contagion: {creditor_id} lost {loss:.2f} "
+                        f"from {bank.id} failure"
+                    )
+                # 失败银行一侧镜像
+                pay_total = min(total_exposure * recovery_rate, bank.reserves)
+                bank.reserves -= pay_total
+                bank.interbank_debt = max(
+                    0.0, bank.interbank_debt - total_exposure
+                )
+                bank.capital += total_exposure - pay_total  # 债务注销收益
+
+            # 处置 gov_bonds: 卖给 CB (流动性注入)
+            # SFC: bank.deposits_from_hh? 不, 应该直接减少 bank.gov_bonds_held
+            # 并增 bank.reserves (CB 购回国债)
+            cb = state.central_bank
+            if cb is not None and bank.gov_bonds_held > 0:
+                cb.gov_bonds += bank.gov_bonds_held
+                cb.bank_reserves += bank.gov_bonds_held
+                bank.reserves += bank.gov_bonds_held
+                bank.gov_bonds_held = 0
+
+            # REO 房产 fire-sale: 推动房价压力
+            if bank.reo_properties > 0 and state.housing_market is not None:
+                # REO 越多, fire-sale 越强 (压制房价)
+                reo_pressure = bank.reo_properties * 0.005
+                state.housing_expectations_factor = max(
+                    0.5, state.housing_expectations_factor - reo_pressure
+                )
+                logger.info(
+                    f"  REO fire-sale: {bank.reo_properties} units, "
+                    f"expectations_factor → {state.housing_expectations_factor:.2f}"
+                )
+
+        # ── 救助注资 (失败银行持续适用, TARP 式多轮) ──
+        # 失败后若资本再度跌破监管线 → 政府发债注资补足.
+        # 记账 (严格镜像): 政府发债 R → CB 购买 → 准备金注入银行,
+        # 财政部持有对银行的股权 (other_assets).
+        #   gov.debt += R / gov.other_assets += R     (政府 NW 不变)
+        #   cb.gov_bonds += R / cb.bank_reserves += R (CB 恒等式保持)
+        #   bank.reserves += R / bank.capital += R    (A = L + capital 保持)
+        if bank.is_failed and state.central_bank is not None:
+            cb2 = state.central_bank
+            bail_margin = float(_cfg(state, "bailout_car_margin", 0.02))
+            assets = bank.total_assets()
+            gov_obj = state.government
+            assert gov_obj is not None
+            target_cap = (
+                bank.car_requirement + bank.car_buffer + bail_margin
+            ) * assets
+            need = max(0.0, target_cap - bank.capital)
+            if need > 1e-9:
+                gov_obj.debt += need
+                gov_obj.other_assets += need
+                cb2.gov_bonds += need
+                cb2.bank_reserves += need
+                bank.reserves += need
+                bank.capital += need
+                logger.info(
+                    f"  Bailout: gov injected {need:.2f} into {bank.id}, "
+                    f"CAR → {bank.car():.3f}"
+                )
+
+            # REO 房产 fire-sale: 推动房价压力
+
+    # Fire-sale 价格影响: 累加到房价压制
+    if state.fire_sale_pressure > 0 and state.housing_market is not None:
+        # 一次性价格压制: P *= (1 - impact × fire_sale_pressure)
+        impact = float(_cfg(state, "fire_sale_price_impact", 0.05))
+        state.housing_market.price *= (1.0 - impact * state.fire_sale_pressure)
+        # 压力随时间衰减
+        state.fire_sale_pressure = max(0.0, state.fire_sale_pressure * 0.85)
