@@ -494,6 +494,16 @@ SFC 注记: 回购 = 以证券质押借入现金，记: 资产端 cash↑ / 负�
 > **MVP 边界（已决策）**: 实验模式看板+干预为主轴（W1-W4 全量, W5 降级为可选）;
 > 单机自用; 中文直出; 场景编辑器(W6 前半)与教程课程(W6 后半)整体延后二期.
 
+#### W3-W4 实测修复记录（首次人工走查发现）
+1. **空白页**: 头部误用 `if={$meta}` 属性(非 Svelte 指令), meta 为 null 时
+   内部表达式求值抛 TypeError → 组件挂载失败整页空白. 修为 `{#if $meta}`.
+2. **导航按钮静默丢失**: 无断言的字符串替换脚本让"部门下钻"入口从未插入,
+   AgentsView 编译进包但永远不可达 → 教训: 补丁必须 assert 替换次数.
+3. **runes 模式陷阱**: AgentsView 引入 `$derived` 后整组件进入 runes 模式,
+   普通 `let` 失去响应性 → 表格永远空. 状态全部改 `$state`.
+4. e2e 冒烟固化: `frontend/tests/e2e_smoke.py`(新建→曲线→干预→下钻→日志,
+   headless 断言零页面错误).
+
 #### W3 — Svelte L1 宏观看板 ✅（2026-08-27）
 交付: `frontend/` (Svelte5+TS+Vite+ECharts); tickStore(WS 实时+REST 补数);
 MacroChart 双轴时序+冲击 markLine; 实验模式看板中文直出.
