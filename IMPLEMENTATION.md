@@ -10,6 +10,7 @@
 
 **测试基线**: 325 passed · 1 xfail · ruff clean · 7 场景 × 多种子零 SFC 违反
 
+**Phase 4 进展**: W1 API 骨架+只读投影 ✅ / W2 干预网关 ✅ (2026-08-27, `ui_service/`)
 **前端设计定稿**: [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) (Phase 4 实现计划见 §6)
 
 ### Phase 3 Week D-M2 + Week F（2026-08-27 完成, Phase 3 收官）
@@ -493,22 +494,18 @@ SFC 注记: 回购 = 以证券质押借入现金，记: 资产端 cash↑ / 负�
 > **MVP 边界（已决策）**: 实验模式看板+干预为主轴（W1-W4 全量, W5 降级为可选）;
 > 单机自用; 中文直出; 场景编辑器(W6 前半)与教程课程(W6 后半)整体延后二期.
 
-#### W1 — API 骨架 + 只读投影
-| 内容 | 说明 |
-|---|---|
-| `ui_service/` 包 | main.py app 工厂 / registry.py(SimulationRegistry+后台线程) / projection.py |
-| 端点 | `POST /api/sims`, `GET series/agent/network`, `GET interventions` |
-| tick 推送 | WS `/api/sims/{id}/ws` 下行 tick 帧 + set_speed/pause/step 上行 |
-| 测试 | FastAPI TestClient 冒烟: 建仿真→跑12月→拉时序断言长度与单调 t |
-验收: 全部端点有测试; 投影只读(不触碰 agent 写路径), 同 seed 复现不受服务层影响.
+#### W1 — API 骨架 + 只读投影 ✅（2026-08-27）
+交付: `financial_sim/ui_service/`(registry/projection/main) + fastapi/uvicorn/httpx2 依赖.
+端点: POST/GET/DELETE `/api/sims`、`command`(speed/step)、`series`、
+`agents/{firms|banks}`、`agent/{sector}/{id}`、WS `/api/sims/{id}/ws`
+(tick 帧 + set_speed/pause/step/run_to 上行命令).
+帧标签语义已固化测试: macro_history 在 t 自增前写入 → 跑 N 步快照标签 0..N-1.
 
-#### W2 — 干预网关（唯一写通道）
-| 内容 | 说明 |
-|---|---|
-| gateway.py | REST body → pydantic 校验 → 构造 ShockEvent 注入 EventManager(加锁) |
-| 回执与审计 | intervention_ack{shock_log_seq}; GET interventions 只读审计表 |
-| 可复现测试 | 相同 seed+相同干预序列两次运行 macro_history 逐位一致 |
-验收: 每条干预都出现在 shock_log; 非法 channel/magnitude 422 且不入账.
+#### W2 — 干预网关（唯一写通道） ✅（2026-08-27）
+交付: `POST interventions`(preset 或自定义 channel+magnitude+offset,
+pydantic 校验→ShockEvent 注入 EventManager); GET interventions 只读审计;
+可复现性回归测试(同 seed 同干预逐位一致). 非法预设/量级 422 不入账.
+16 个 UI API 测试 (`tests/integration/test_ui_api.py`).
 
 #### W3 — Svelte SPA: L1 宏观看板
 | 内容 | 说明 |
