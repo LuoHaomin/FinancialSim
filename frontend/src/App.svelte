@@ -72,7 +72,8 @@
 <main>
   <header>
     <h1>FinancialSim <small>ABM 宏观经济仿真器</small></h1>
-    <div class="meta" if={$meta}>
+    {#if $meta}
+    <div class="meta">
       场景: {$meta.name} · seed 固定 · 第 <b>{$meta.t}</b> 月 ·
       speed={$meta.speed}
       {#if $meta.sfc_violations > 0}
@@ -81,6 +82,7 @@
         <span class="ok">SFC 一致 ✓</span>
       {/if}
     </div>
+    {/if}
   </header>
 
   <section class="bar">
