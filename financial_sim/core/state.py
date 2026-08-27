@@ -8,6 +8,7 @@ from financial_sim.agents.commercial_bank import CommercialBank
 from financial_sim.agents.firm import Firm
 from financial_sim.agents.government import Government
 from financial_sim.agents.household import Household
+from financial_sim.expectations.inflation import InflationExpectation
 from financial_sim.monetary.balance_sheets import (
     CentralBankBalanceSheet,
     CommercialBankBalanceSheet,
@@ -65,6 +66,15 @@ class SimulationState:
     unemployment_rate: float = 0.0
     potential_gdp: float = 1000.0
     output_gap: float = 0.0
+
+    # ── Phase 1: 价格水平 / 预期 / 随机源 ──
+    price_level: float = 1.0
+    price_level_history: list[float] = field(default_factory=list)
+    last_month_sales: float = 0.0  # 上月实际销量 (商品市场定价基准)
+    inflation_expectation: InflationExpectation = field(
+        default_factory=InflationExpectation
+    )
+    rng_manager: object | None = None  # simulation.rng.RNGManager
 
     # ── 历史 (用于分析与绘图) ──
     macro_history: list[MacroSnapshot] = field(default_factory=list)

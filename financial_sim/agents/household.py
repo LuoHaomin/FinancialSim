@@ -1,14 +1,10 @@
-"""Household agent (Phase 0 simplified).
+"""Household agent.
 
-Phase 0 仅包含最简化的字段和行为:
-- 状态: id, sector, wage, employed, cash, deposits, income
-- 行为: 消费决策 (线性), 储蓄决策 (线性), 就业状态管理
-
-Phase 1 将扩展:
-- 永久收入消费 + 财富效应
-- 异质性 (教育、储蓄率、MPC)
-- 资产配置 (股票/房产/债券)
-- 信贷需求
+Phase 1 行为:
+- 消费 = MPC × 永久收入 + 财富效应 (λ × 超额净财富), 受流动性约束
+- 永久收入用收入的指数滑动平均近似
+- 异质性: savings_rate / mpc / wage 从 config 分布抽样初始化
+  (在 Simulation._build_state 中完成, 不是在本文件里抽样)
 """
 from __future__ import annotations
 
@@ -17,19 +13,19 @@ from dataclasses import dataclass
 
 @dataclass
 class Household:
-    """Phase 0 简化家庭 agent.
+    """家庭 agent.
 
     字段:
     - id: 唯一标识
     - sector: 当前就职部门 (None = 失业)
-    - wage: 月工资
-    - employed: 就业状态
-    - unemployment_duration: 失业月数
-    - cash: 现金 (在 CB.currency_issued 中)
-    - deposits: 银行存款 (在 bank.deposits_from_hh 中)
+    - wage: 月工资; employed 时有效
+    - employed / unemployment_duration: 就业状态
+    - cash: 现金 (须与 CB.currency_issued 对应)
+    - deposits: 银行存款 (须与 bank.deposits_from_hh 对应)
     - income: 当期可支配收入 (税后)
-    - savings_rate: 储蓄倾向 (默认 0.3)
-    - mpc: 边际消费倾向 (默认 0.7)
+    - permanent_income: 收入的指数滑动平均 (消费基准)
+    - savings_rate / mpc: 异质行为参数
+    - wealth_effect_coef λ: 每单位超额财富拉动的边际消费
     """
 
     id: str
@@ -45,22 +41,41 @@ class Household:
     deposits: float = 0.0
     income: float = 0.0
 
-    # ── 行为参数 (Phase 1 会改为异质) ──
+    # ── 行为参数 (Phase 0 同构 → Phase 1 异质初始化) ──
     savings_rate: float = 0.3
     mpc: float = 0.7
 
-    # ── 决策方法 ──
+    # ── Phase 1: 永久收入 + 财富效应 ──
+    permanent_income: float = 0.0
+    income_adapt_speed: float = 0.2       # 永久收入更新的平滑系数
+    wealth_effect_coef: float = 0.0       # 默认 0 → 与 Phase 0 完全一致
+    wealth_buffer_months: float = 3.0     # 前 N 个月永久收入视为"缓冲", 不拉动消费
 
     def decide_consumption(self) -> float:
-        """Phase 0: 线性消费 c = mpc * income."""
-        return self.mpc * self.income
+        """消费决策: c = mpc·Y^perm + λ·max(0, NW − buffer·Y^perm).
+
+        流动性约束 (c ≤ 存款) 在 step 层施加, 因为需要联动 SFC 记账.
+        """
+        pi = self.permanent_income if self.permanent_income > 0 else self.income
+        target = self.mpc * pi
+        excess_wealth = max(0.0, self.net_worth() - self.wealth_buffer_months * pi)
+        target += self.wealth_effect_coef * excess_wealth
+        return max(0.0, target)
 
     def decide_savings(self) -> float:
-        """Phase 0: 线性储蓄 s = savings_rate * income."""
-        return self.savings_rate * self.income
+        """储蓄 = 收入 − 意愿消费 (下限 0)."""
+        return max(0.0, self.income - self.decide_consumption())
+
+    def update_permanent_income(self) -> None:
+        """每个 tick 末更新永久收入: 指数滑动平均."""
+        if self.permanent_income <= 0:
+            self.permanent_income = self.income
+            return
+        a = min(1.0, max(0.0, self.income_adapt_speed))
+        self.permanent_income += a * (self.income - self.permanent_income)
 
     def net_worth(self) -> float:
-        """Phase 0: 净资产 = 现金 + 存款 (无负债)."""
+        """净资产 = 现金 + 存款 (Phase 1 尚无股票/房产/负债)."""
         return self.cash + self.deposits
 
     # ── 就业状态管理 ──
@@ -81,3 +96,6 @@ class Household:
         """失业 +1 月. 仅在 unemployed 时调用."""
         if not self.employed:
             self.unemployment_duration += 1
+
+
+__all__ = ["Household"]

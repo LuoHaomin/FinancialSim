@@ -1,6 +1,8 @@
 """Simulation: 顶层仿真类, 编排 tick + 初始化 + SFC."""
 from __future__ import annotations
 
+import numpy as np
+
 from financial_sim.agents.central_bank import CentralBank
 from financial_sim.agents.commercial_bank import CommercialBank
 from financial_sim.agents.firm import Firm
@@ -9,26 +11,31 @@ from financial_sim.agents.household import Household
 from financial_sim.config import SimConfig
 from financial_sim.core.state import SimulationState
 from financial_sim.core.step import monthly_tick
+from financial_sim.expectations.inflation import InflationExpectation
+from financial_sim.simulation.rng import RNGManager
+from financial_sim.utils.distributions import truncated_normal
 from financial_sim.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class Simulation:
-    """Phase 0 仿真入口.
+    """Phase 1 仿真入口.
 
     使用:
         config = SimConfig.default()
-        sim = Simulation(config)
+        sim = Simulation(config, seed=42)
         sim.run(n_ticks=12)
-        print(sim.state.real_gdp)
+        state = sim.state  # 查看宏观变量
     """
 
-    def __init__(self, config: SimConfig | None = None) -> None:
+    def __init__(self, config: SimConfig | None = None, seed: int | None = None) -> None:
         self.config = config or SimConfig.default()
+        self.seed = seed if seed is not None else self.config.seed
+        self.rng = RNGManager(seed=self.seed)
         self.state = self._build_state(self.config)
         logger.info(
-            f"Simulation initialized: "
+            f"Simulation initialized (seed={self.seed}): "
             f"{len(self.state.households)} HHs, "
             f"1 firm, 1 bank, "
             f"policy_rate={self.state.central_bank.policy_rate:.3f}"
@@ -38,51 +45,45 @@ class Simulation:
     # 初始化 (SFC-balanced)
     # ════════════════════════════════════════════════════════════
     def _build_state(self, config: SimConfig) -> SimulationState:
-        """构造初始 SFC-balanced state.
-
-        初始时, 所有家庭就业, 1 家聚合企业, 平衡预算政府, 央行 + 银行已建立.
-
-        初始资金流:
-        - 政府发行 X 国债 → CB 买入 → CB 创造准备金 X → 银行收到准备金
-        - 银行初始资本 X (来自 CB 的 "equity infusion")
-        - 银行借 Y 给企业 → 企业获得 Y 存款
-        - 企业用存款支付工资
-        """
+        """构造初始 SFC-balanced state, 家庭参数走命名随机流."""
         n_hh = config.n_households
+        h_rng = self.rng.stream("household_init")
 
         # ── 央行 ──
         cb = CentralBank(
             policy_rate=config.cb_policy_rate_initial,
             neutral_rate=config.cb_neutral_rate,
             target_inflation=config.target_inflation,
+            taylor_inflation_coeff=config.taylor_inflation_coeff,
+            taylor_output_coeff=config.taylor_output_coeff,
         )
-        # CB 创造初始准备金 (通过 OMO 买入政府债)
         initial_reserves = float(n_hh) * 10  # 每个家庭 10 单位
         cb.gov_bonds = initial_reserves
         cb.bank_reserves = initial_reserves
-        # CB cap = 0 (SFC: A=gov_bonds = L=bank_reserves)
 
         # ── 银行 ──
-        # 收到准备金后, 初始资本 = 准备金 (equity infusion from CB)
         bank = CommercialBank(
             id="bank_1",
             reserves=initial_reserves,
-            capital=initial_reserves,  # A=reserves, L=0, cap=reserves
+            capital=initial_reserves,
+            car_requirement=config.car_requirement,
+            car_buffer=config.car_buffer,
+            loan_rate_base_spread=config.loan_rate_base_spread,
+            loan_rate_car_pressure=config.loan_rate_car_pressure,
+            deposit_rate_margin=config.deposit_rate_margin,
         )
 
         # ── 政府 ──
-        # 初始时已发行国债 (被 CB 持有)
         government = Government(
             debt=initial_reserves,
-            gov_spending=200.0,
-            transfers=50.0,
-            interest_rate=config.cb_policy_rate_initial,  # 国债利率 = 政策利率
+            gov_spending=config.gov_spending_monthly if config.fiscal_enabled else 0.0,
+            transfers=0.0,
+            interest_rate=config.cb_policy_rate_initial,
         )
 
         # ── 企业 ──
-        # 从银行借款, 获得初始存款 (用以支付首月工资)
         wage = 1.0
-        initial_firm_deposits = float(n_hh) * wage  # 足够支付 1 个月工资
+        initial_firm_deposits = float(n_hh) * wage * 2  # 首月工资 + 缓冲
         bank.loans_to_firms = initial_firm_deposits
         bank.deposits_from_firms = initial_firm_deposits
         firm = Firm(
@@ -94,21 +95,47 @@ class Simulation:
             employees=n_hh,
             deposits=initial_firm_deposits,
             debt=initial_firm_deposits,
+            depreciation_rate=config.depreciation_rate,
+            investment_sensitivity=config.investment_sensitivity,
+            calvo_price_prob=config.calvo_price_prob,
+            calvo_markup_target=config.calvo_markup_target,
         )
 
-        # ── 家庭 ──
+        # ── 家庭 (异质: 储蓄率/MPC 截断正态; 工资对数正态) ──
+        savings_draws = truncated_normal(
+            h_rng, config.hh_savings_rate_mean, config.hh_savings_rate_std, 0.0, 0.95, n_hh,
+        )
+        mpc_draws = truncated_normal(
+            h_rng, config.hh_mpc_mean, config.hh_mpc_std, 0.05, 1.0, n_hh,
+        )
+        wage_draws = h_rng.lognormal(
+            mean=float(np.log(wage)), sigma=config.hh_wage_lognormal_sigma, size=n_hh
+        )
+        deposits_draws = h_rng.lognormal(
+            mean=float(np.log(config.hh_initial_deposit_median)), sigma=0.6, size=n_hh
+        )
         households = [
             Household(
                 id=f"h_{i:04d}",
                 sector="consumer_goods",
-                wage=wage,
-                cash=0.0,
-                deposits=0.0,
-                savings_rate=0.3,
-                mpc=0.7,
+                wage=float(wage_draws[i]),
+                deposits=float(deposits_draws[i]),
+                savings_rate=float(savings_draws[i]),
+                mpc=float(mpc_draws[i]),
+                wealth_effect_coef=config.wealth_effect_coef,
             )
             for i in range(n_hh)
         ]
+        for h in households:
+            h.permanent_income = h.wage
+
+        # 异质存款必须与银行账目镜像 (SFC check: HH 存款 = bank.deposits_from_hh)
+        hh_total_deposits = sum(h.deposits for h in households)
+        bank.deposits_from_hh += hh_total_deposits
+        bank.reserves += hh_total_deposits
+        cb.bank_reserves += hh_total_deposits
+        cb.gov_bonds += hh_total_deposits  # CB 再购等额国债为注入提供资产
+        government.debt += hh_total_deposits
 
         # ── 构造 state ──
         return SimulationState(
@@ -123,7 +150,12 @@ class Simulation:
             nominal_gdp=0.0,
             inflation_yoy=config.initial_inflation,
             unemployment_rate=0.0,
-            potential_gdp=float(n_hh),  # 稳态 GDP = 1 单位/人
+            potential_gdp=float(n_hh),
+            price_level=firm.price,
+            inflation_expectation=InflationExpectation(
+                value=config.initial_inflation, anchor=config.target_inflation
+            ),
+            rng_manager=self.rng,
         )
 
     # ════════════════════════════════════════════════════════════
@@ -142,6 +174,7 @@ class Simulation:
             if i % 12 == 0:
                 logger.info(
                     f"  t={self.state.t}: GDP={self.state.real_gdp:.2f}, "
+                    f"infl={self.state.inflation_yoy:.2%}, "
                     f"unemp={self.state.unemployment_rate:.2%}, "
                     f"SFC_violations={sum(len(v) for v in self.state.sfc_violations)}"
                 )
@@ -151,5 +184,6 @@ class Simulation:
     # 便捷方法
     # ════════════════════════════════════════════════════════════
     def reset(self) -> None:
-        """重置到初始状态."""
+        """重置到初始状态 (同 seed 完全复现)."""
+        self.rng.reset()
         self.state = self._build_state(self.config)

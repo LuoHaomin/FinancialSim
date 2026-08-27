@@ -7,9 +7,15 @@ from financial_sim.markets.goods import GoodsMarket
 
 
 def _set_household_incomes(sim, wage: float = 1.0) -> None:
-    """辅助: 给所有家庭设置收入, 这样 decide_consumption() > 0."""
+    """辅助: 给所有家庭设置收入与永久收入, 关闭财富效应.
+
+    这样 decide_consumption() = mpc * wage 精确可控.
+    """
     for h in sim.state.households:
         h.income = wage
+        h.permanent_income = wage
+        h.wealth_effect_coef = 0.0
+        h.mpc = 0.7
 
 
 class TestGoodsMarketInventory:

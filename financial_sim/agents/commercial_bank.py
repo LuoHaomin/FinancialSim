@@ -1,9 +1,15 @@
-"""CommercialBank agent (Phase 0 simplified).
+"""CommercialBank agent.
 
-Phase 0 仅包含:
-- 单一聚合银行 (Phase 2 加入多家 + core-periphery 网络)
-- 简单 CAR 计算 (Phase 1 加入 LCR/NSFR)
-- 无利率传导 (Phase 1 加入完整传导链)
+Phase 1 行为:
+- 利率定价: 存贷利差挂靠政策利率; 贷款溢价随资本充足率缺口顺周期上升
+- 利润循环: 贷款利息收入 − 存款利息支出 → 留存进资本
+- CAR 计算 (风险加权 Phase 2 加)
+
+SFC 注记:
+本类的资金操作只动银行自身账目; 借款人/存款人一侧的镜像记账
+由 core/step.py 统一完成, 两边同步更新以满足跨部门一致性校验:
+- 收贷款利息: capital += i 且借款人存款 −i (或债务资本化)
+- 付存款利息: capital −= d 且存款人存款 += d
 """
 from __future__ import annotations
 
@@ -12,16 +18,7 @@ from dataclasses import dataclass
 
 @dataclass
 class CommercialBank:
-    """Phase 0 简化商业银行.
-
-    字段对应 CommercialBankBalanceSheet 的简化版:
-    - 资产: reserves, loans_to_firms, loans_to_households, gov_bonds_held
-    - 负债: deposits_from_hh, deposits_from_firms
-    - 资本: capital
-
-    Phase 1 加入: loans_by_firm (按借款人拆分), NPL 比率,
-                  risk_weighted_assets, LCR, NSFR
-    """
+    """商业银行 agent (Phase 1: 单一聚合银行)."""
 
     id: str = "bank_1"
 
@@ -38,6 +35,13 @@ class CommercialBank:
     # ── 资本 ──
     capital: float = 0.0
 
+    # ── 监管/定价参数 ──
+    car_requirement: float = 0.08
+    car_buffer: float = 0.02
+    loan_rate_base_spread: float = 0.03
+    loan_rate_car_pressure: float = 0.5
+    deposit_rate_margin: float = -0.02
+
     # ── 计算方法 ──
 
     def total_assets(self) -> float:
@@ -52,18 +56,44 @@ class CommercialBank:
         return self.deposits_from_hh + self.deposits_from_firms
 
     def car(self) -> float:
-        """资本充足率 = capital / total_assets.
-
-        Phase 0 简化: 用总资产而非风险加权资产.
-        """
-        if self.total_assets() == 0:
-            return float("inf")  # 没有资产时, CAR 无定义
-        return self.capital / self.total_assets()
+        """资本充足率 = capital / total_assets (简化: 未做风险加权)."""
+        ta = self.total_assets()
+        if ta == 0:
+            return float("inf")
+        return self.capital / ta
 
     def net_worth(self) -> float:
-        """银行 NW = capital 字段 (独立追踪).
-
-        不变量: total_assets() == total_liabilities() + capital.
-        当违反时, SFC 校验会报错.
-        """
+        """银行 NW = capital 字段. 不变量由 SFC 校验守护."""
         return self.capital
+
+    def car_gap(self) -> float:
+        """CAR 相对监管要求的缺口 (>0 = 不达标幅度)."""
+        return max(0.0, (self.car_requirement + self.car_buffer) - self.car())
+
+    # ── Phase 1: 利率定价 ──
+
+    def set_rates(self, policy_rate: float, rate_floor: float = -0.005) -> tuple[float, float]:
+        """根据政策利率设定存贷利率. 返回 (loan_rate, deposit_rate).
+
+        - deposit_rate = max(下限, policy + margin)
+        - loan_rate    = policy + base_spread + pressure × CAR 缺口
+        """
+        deposit_rate = max(rate_floor, policy_rate + self.deposit_rate_margin)
+        spread = self.loan_rate_base_spread + self.loan_rate_car_pressure * self.car_gap()
+        loan_rate = policy_rate + spread
+        return loan_rate, deposit_rate
+
+    # ── Phase 1: 利润循环 ──
+
+    def book_loan_interest_income(self, amount: float) -> None:
+        """确认贷款利息收入 → 资本. (借款人一侧由 step 层镜像.)"""
+        if amount > 0:
+            self.capital += amount
+
+    def book_deposit_interest_expense(self, amount: float) -> None:
+        """支付存款利息 → 资本减少. (存款人一侧由 step 层镜像加到存款.)"""
+        if amount > 0:
+            self.capital -= amount
+
+
+__all__ = ["CommercialBank"]

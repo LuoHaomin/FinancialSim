@@ -34,6 +34,8 @@ class CentralBank:
     policy_rate: float = 0.025
     target_inflation: float = 0.02
     neutral_rate: float = 0.02
+    taylor_inflation_coeff: float = 1.5
+    taylor_output_coeff: float = 0.5
 
     # ── 资产负债表 ──
     gov_bonds: float = 0.0
@@ -48,13 +50,14 @@ class CentralBank:
         inflation: float,
         output_gap: float,
         smoothing: float = 0.85,
+        rate_floor: float = -0.005,
     ) -> float:
         """Taylor Rule 利率设定 (含平滑).
 
         公式:
             r_target = r* + 1.5 × (π - π*) + 0.5 × output_gap
             r_new    = smoothing × r_prev + (1 - smoothing) × r_target
-            r_new    = max(r_new, -0.005)  # 零利率下限
+            r_new    = max(r_new, rate_floor)
 
         Parameters
         ----------
@@ -64,16 +67,16 @@ class CentralBank:
             产出缺口 (e.g. -0.02 = 低于潜力 2%)
         smoothing : float
             惯性参数 (0 = 无平滑, 0.85 = 标准)
+        rate_floor : float
+            利率下限 (默认 -0.5%)
         """
         inflation_gap = inflation - self.target_inflation
         r_target = (
-            self.neutral_rate
-            + 1.5 * inflation_gap
-            + 0.5 * output_gap
+            self.neutral_rate + self.taylor_inflation_coeff * inflation_gap
+            + self.taylor_output_coeff * output_gap
         )
         r_new = smoothing * self.policy_rate + (1 - smoothing) * r_target
-        # 应用零利率下限: 允许轻微负利率但不低于 -0.5%
-        return max(r_new, -0.005)
+        return max(r_new, rate_floor)
 
     def omo_buy(self, amount: float) -> None:
         """公开市场操作: CB 买入国债 → 注入银行准备金.

@@ -43,7 +43,17 @@ class Government:
 
     # ── 决策方法 ──
 
+    def compute_unemployment_benefits(
+        self,
+        n_unemployed: int,
+        avg_wage: float,
+        replacement_rate: float = 0.4,
+    ) -> float:
+        """失业救济 = 失业人数 × 平均工资 × 替代率 (自动稳定器)."""
+        return n_unemployed * avg_wage * replacement_rate
+
     def collect_taxes(self, total_income: float, total_profit: float) -> float:
+
         """收取所得税 + 公司税. 返回税收总额."""
         income_tax = total_income * self.income_tax_rate
         corp_tax = max(0.0, total_profit) * self.corp_tax_rate

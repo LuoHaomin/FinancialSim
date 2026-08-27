@@ -1,8 +1,60 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：规划阶段（v0.2 设计已定型）
+> 状态：Phase 0 完成 ✅ / Phase 1 进行中 (核心行为+金融部门+快照已落地)
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
+
+---
+
+## 进度看板（2026-08-27 更新）
+
+**测试基线**: 131 passed · ruff clean · 48 个月 baseline 零 SFC 违反
+
+### Phase 0 — 全部完成 ✅
+Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、月度 tick、商品/劳动市场、e2e + 性能测试。
+
+### Phase 1 已完成（约 Week 3-7 核心部分）
+
+| 模块 | 内容 | 文件 |
+|---|---|---|
+| RNGManager | 命名流、可复现、reset/spawn | `simulation/rng.py` |
+| 异质性分布 | LogNormal 工资/存款, 截断正态储蓄率/MPC | `utils/distributions.py` |
+| 配置扩展 | Taylor 参数/税率/财政/银行利差/CAR/折旧/卡尔沃/异质性参数 | `config.py` |
+| 完整 Household | 永久收入消费 + 财富效应(λ 可配) + 流动性约束 | `agents/household.py` |
+| 完整 Firm | 折旧 δ、加速器投资、卡尔沃定价(可选) | `agents/firm.py` |
+| 完整 Bank | 政策利率传导存贷定价 + CAR 溢价顺周期 + 利润循环 | `agents/commercial_bank.py` |
+| Government 预算 | 收入税/公司税/G/失业救济; 赤字经 CB 购债融资 | `core/step.py` `_government_cycle` |
+| 通胀预期 | 适应性 + 锚回归 + 脱锚(persistence) | `expectations/inflation.py` |
+| 快照/重放 | JSON 全量序列化 + 恢复后续跑 | `simulation/snapshot.py` |
+| 测试 | +33 个: rng/预期/主体扩展/快照/复现性 | `tests/unit/test_{rng,inflation_expectation,phase1_agents,snapshot}.py` |
+
+### 过程中发现并修复的关键问题
+
+1. **贷款利息资本化破坏银行恒等式**: 企业付不起利息计入债务时，银行资产↑但没有按权责发生制确认收入 → 资本缺口。已修（资本化同时记 income）。
+2. **商品市场定价时序**: 定价在补库存之前执行 → 库存永远"偏低"→ 月月提价 → 通胀螺旋脱锚。已修为月末库存定价。
+3. **工资规则过激**: Phase 0 半年调薪系数 0.5 在充分就业下每半年加薪 50%。改为通胀指数化 + κ=0.10 的菲利普斯斜率。
+4. **财政规模失配**: G 从固定金额改为潜在产出比例(45%)自动定标; 稳态校准 ≈ 1 − avg_mpc×(1−τ)。
+5. **SFC 校验容差**: 绝对 1e-6 在 ~1e4 量级下浮点累积误差误报, 改为相对容差。
+
+### Phase 1 待办（按计划顺序）
+
+- [ ] Week 3-4 尾巴: 多部门 firms / CES 生产（Phase 2 备选）
+- [ ] Week 5: Stiglitz-Weiss 信贷配给 + LTV/DTI（家庭信贷市场）
+- [ ] Week 6: Brock-Hommes 股票市场 + 债券期限结构 + ShockEvent 事件系统
+- [ ] Week 7: PerfMonitor 埋点 (现有 performance 测试为基础加强)
+- [ ] Week 8: 7 个 stylized facts 校准测试套件 + scenarios/*.yaml 场景库
+- [ ] 失业机制: 目前劳动市场"雇所有人"→失业率恒 0, 需求侧雇佣决策引入摩擦失业
+
+### 已知建模限制（有意简化, 二期修正）
+
+- 企业投资不消耗金融资源（隐含留存利润实物化假设）
+- 财政赤字 100% 由 CB 承接（无私人部门持债渠道）
+- 国债利息默认滚入本金（CB 利润上缴未建模）
+- 存款利率为单一聚合利率（无个体层级差异化）
+
+---
+
+## 0. 阅读指南
 
 本文档把设计文档转化为可执行的实施路线。每个 Phase 都有：
 - 明确的目标
@@ -11,8 +63,6 @@
 - 验收标准
 
 ---
-
-## 0. 阅读指南
 
 | 章节 | 内容 | 何时读 |
 |---|---|---|

@@ -16,7 +16,16 @@ from __future__ import annotations
 
 from typing import Any
 
-EPSILON = 1e-6
+EPSILON_ABS = 1e-6
+
+
+def _tolerance(*magnitudes: float) -> float:
+    """相对容差: 大数量级下浮点累积误差按比例放宽.
+
+    ~1e4 的量级允许 ~1e-5 的绝对误差 (相对 1e-9).
+    """
+    scale = max(abs(m) for m in magnitudes) if magnitudes else 0.0
+    return max(EPSILON_ABS, 1e-9 * scale)
 
 
 class SFCViolationError(Exception):
@@ -63,7 +72,7 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
         liab = sheet.sum_liabilities()
         nw = sheet.net_worth
         delta = a - liab - nw
-        if abs(delta) > EPSILON:
+        if abs(delta) > _tolerance(a, liab):
             errors.append(
                 f"BS identity violation: {name} "
                 f"A={a:.4f} L={liab:.4f} NW={nw:.4f} Δ={delta:.6f}"
@@ -72,7 +81,7 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
     # ─── 2. 跨部门: 存款 ───
     if hh is not None and b is not None:
         diff = hh.deposits - b.deposits_from_hh
-        if abs(diff) > EPSILON:
+        if abs(diff) > _tolerance(hh.deposits, b.deposits_from_hh):
             errors.append(
                 f"Deposit mismatch (HH): HH.deposits={hh.deposits} "
                 f"!= Banks.deposits_from_hh={b.deposits_from_hh} Δ={diff:.4f}"
@@ -80,7 +89,7 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
 
     if f is not None and b is not None:
         diff = f.deposits - b.deposits_from_firms
-        if abs(diff) > EPSILON:
+        if abs(diff) > _tolerance(f.deposits, b.deposits_from_firms):
             errors.append(
                 f"Deposit mismatch (Firms): Firms.deposits={f.deposits} "
                 f"!= Banks.deposits_from_firms={b.deposits_from_firms} Δ={diff:.4f}"
@@ -89,7 +98,7 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
     # ─── 3. 跨部门: 准备金 ───
     if b is not None and cb is not None:
         diff = b.reserves - cb.bank_reserves
-        if abs(diff) > EPSILON:
+        if abs(diff) > _tolerance(b.reserves, cb.bank_reserves):
             errors.append(
                 f"Reserve mismatch: Banks.reserves={b.reserves} "
                 f"!= CB.bank_reserves={cb.bank_reserves} Δ={diff:.4f}"
@@ -99,7 +108,7 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
     if hh is not None and f is not None and cb is not None:
         cash_held = hh.cash + f.cash
         diff = cash_held - cb.currency_issued
-        if abs(diff) > EPSILON:
+        if abs(diff) > _tolerance(cash_held, cb.currency_issued):
             errors.append(
                 f"Cash mismatch: HH+Firms cash={cash_held} "
                 f"!= CB.currency_issued={cb.currency_issued} Δ={diff:.4f}"
@@ -109,7 +118,7 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
     if gov is not None and b is not None and cb is not None:
         held = b.gov_bonds_held + cb.gov_bonds
         diff = held - gov.bonds_outstanding
-        if abs(diff) > EPSILON:
+        if abs(diff) > _tolerance(held, gov.bonds_outstanding):
             errors.append(
                 f"Bond mismatch: Banks+CB holdings={held} "
                 f"!= Gov.bonds_outstanding={gov.bonds_outstanding} Δ={diff:.4f}"

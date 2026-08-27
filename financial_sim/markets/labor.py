@@ -20,10 +20,15 @@ class LaborMarket:
 
     WAGE_ADJUSTMENT_FREQ = 6  # 每 6 个月调一次
     NAIRU = 0.05             # 自然失业率 5%
-    WAGE_PRESSURE_COEFF = 0.5  # 工资对失业缺口的反应
+    # 年化工资菲利普斯曲线斜率: 失业缺口每 1pt → 工资增长差 0.1pt/年
+    WAGE_PRESSURE_COEFF = 0.10
 
     def clear(self, state: SimulationState) -> None:
-        """Phase 0: 雇佣所有失业者, 定期调整工资."""
+        """Phase 1: 雇佣所有失业者, 定期调整工资.
+
+        工资增长 = 通胀预期(年化)/2 + κ × 失业缺口
+        下行对称性弱化: 失业超过 NAIRU 时下调幅度减半 (向下粘性).
+        """
         firm = state.firm
         if firm is None:
             return
@@ -37,21 +42,28 @@ class LaborMarket:
         # 2. 工资调整 (每 N 个月)
         if state.t > 0 and state.t % self.WAGE_ADJUSTMENT_FREQ == 0:
             self._adjust_wages(state)
+            # 在职员工工资跟随新 offer 水平 (保证聚合口径一致)
+            for h in state.households:
+                if h.employed:
+                    h.wage = firm.wage_offered
 
     def _adjust_wages(self, state: SimulationState) -> None:
-        """基于失业率调整工资."""
+        """基于通胀预期 + 失业缺口的工资方程 (年率折半为半年频率)."""
         firm = state.firm
         if firm is None:
             return
 
         unemployment = state.unemployment_rate_calc()
+        unemployment_gap = self.NAIRU - unemployment  # >0 = 劳动力市场紧张
 
-        # 失业反馈: 失业 > NAIRU → 工资降; < NAIRU → 工资升
-        unemployment_gap = (self.NAIRU - unemployment) / self.NAIRU
-        # 上行敏感, 下行粘性 (Phase 1 完整版)
-        if unemployment_gap > 0:
-            pressure = self.WAGE_PRESSURE_COEFF * unemployment_gap
+        exp_module = getattr(state, "inflation_expectation", None)
+        indexation = (
+            exp_module.value / 2.0 if exp_module is not None else 0.0
+        )
+        if unemployment_gap >= 0:
+            pressure = indexation + self.WAGE_PRESSURE_COEFF * unemployment_gap
         else:
-            pressure = 0.2 * unemployment_gap  # 下行更粘
+            # 向下粘性: 紧缩时期降薪幅度减半且无指数化上推
+            pressure = 0.5 * (indexation + self.WAGE_PRESSURE_COEFF * unemployment_gap)
 
-        firm.wage_offered *= 1 + pressure
+        firm.wage_offered *= 1.0 + pressure
