@@ -122,6 +122,10 @@ class SimulationState:
     # ── Phase 3 Week C: 股票市场 ──
     stock_market: object | None = None     # markets.stocks.StockMarket
     cross_holdings: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    # ── Phase 3 Week D: NBFI ──
+    investment_bank: object | None = None  # agents.investment_bank.InvestmentBank
+    asset_manager: object | None = None    # agents.asset_manager.AssetManager
     last_month_dividends: float = 0.0      # 上月实发分红总额 (股息锚)
     housing_price_history: list[float] = field(default_factory=list)
     housing_expectations_factor: float = 1.0  # 房价泡沫因子 (>1 = 投机性溢价)
@@ -209,8 +213,10 @@ class SimulationState:
             interbank_claims = sum(b.interbank_claims for b in self.banks)
             reo_value = sum(b.reo_value for b in self.banks)
             seized_assets = sum(b.seized_assets for b in self.banks)
+            repo_claims = sum(b.repo_claims for b in self.banks)
             deposits_from_hh = sum(b.deposits_from_hh for b in self.banks)
             deposits_from_firms = sum(b.deposits_from_firms for b in self.banks)
+            deposits_from_nbfi = sum(b.deposits_from_nbfi for b in self.banks)
             interbank_debt = sum(b.interbank_debt for b in self.banks)
             lolr_debt = sum(b.lolr_debt for b in self.banks)
             capital = sum(b.capital for b in self.banks)
@@ -223,8 +229,10 @@ class SimulationState:
             interbank_claims = 0.0
             reo_value = self.bank.reo_value
             seized_assets = self.bank.seized_assets
+            repo_claims = self.bank.repo_claims
             deposits_from_hh = self.bank.deposits_from_hh
             deposits_from_firms = self.bank.deposits_from_firms
+            deposits_from_nbfi = self.bank.deposits_from_nbfi
             interbank_debt = 0.0
             lolr_debt = 0.0
             capital = self.bank.capital
@@ -282,6 +290,12 @@ class SimulationState:
                 ),
                 bank_loans=sum(f.debt for f in self.firms),
             ),
+            "investment_bank": (
+                _ib_bs(self) if self.investment_bank else None
+            ),
+            "asset_manager": (
+                _am_bs(self) if self.asset_manager else None
+            ),
             "banks": CommercialBankBalanceSheet(
                 reserves=reserves,
                 loans_to_firms=loans_to_firms,
@@ -290,8 +304,10 @@ class SimulationState:
                 interbank_claims=interbank_claims,
                 reo_value=reo_value,
                 seized_assets=seized_assets,
+                repo_claims=repo_claims,
                 deposits_from_hh=deposits_from_hh,
                 deposits_from_firms=deposits_from_firms,
+                deposits_from_nbfi=deposits_from_nbfi,
                 interbank_debt=interbank_debt,
                 capital=capital,
             ),
@@ -325,3 +341,29 @@ class SimulationState:
             total_output=self.total_output(),
         )
         self.macro_history.append(snap)
+
+
+
+def _ib_bs(state: SimulationState):
+    from financial_sim.monetary.balance_sheets import InvestmentBankBalanceSheet
+    ib = state.investment_bank
+    price = getattr(state.stock_market, "price", 0.0) or 0.0
+    return InvestmentBankBalanceSheet(
+        deposits=ib.deposits,
+        stocks=ib.stock_units * price,
+        repo_debt=ib.repo_debt,
+        capital=ib.capital,
+    )
+
+
+def _am_bs(state: SimulationState):
+    from financial_sim.monetary.balance_sheets import AssetManagerBalanceSheet
+    am = state.asset_manager
+    price = getattr(state.stock_market, "price", 0.0) or 0.0
+    am_stocks = am.stock_units * price
+    return AssetManagerBalanceSheet(
+        deposits=am.deposits,
+        stocks=am_stocks,
+        fund_nav_liability=am.deposits + am_stocks,
+        capital=0.0,
+    )

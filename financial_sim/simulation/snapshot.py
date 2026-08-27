@@ -31,7 +31,7 @@ class SnapshotError(Exception):
     """快照版本不匹配或损坏."""
 
 
-SNAPSHOT_VERSION = 4  # v4: 股票市场 — Phase 3 Week C
+SNAPSHOT_VERSION = 5  # v5: NBFI (投行+资管) — Phase 3 Week D
 
 _AGENT_TYPES = {
     "household": Household,
@@ -85,6 +85,13 @@ class StateSnapshot:
                 _to_dict(state.stock_market) if state.stock_market else None
             ),
             "cross_holdings": getattr(state, "cross_holdings", {}) or {},
+            "investment_bank": (
+                _to_dict(state.investment_bank)
+                if state.investment_bank else None
+            ),
+            "asset_manager": (
+                _to_dict(state.asset_manager) if state.asset_manager else None
+            ),
             "bank": _to_dict(state.bank) if state.bank else None,
             "banks": [_to_dict(b) for b in state.banks],  # Phase 2: multi-bank
             "housing_market": (
@@ -150,6 +157,16 @@ class StateSnapshot:
                 payload["bank"], CommercialBank
             )
         state.cross_holdings = payload.get("cross_holdings", {}) or {}
+        if payload.get("investment_bank"):
+            from financial_sim.agents.investment_bank import InvestmentBank
+            state.investment_bank = _from_dict(  # type: ignore[arg-type]
+                payload["investment_bank"], InvestmentBank
+            )
+        if payload.get("asset_manager"):
+            from financial_sim.agents.asset_manager import AssetManager
+            state.asset_manager = _from_dict(  # type: ignore[arg-type]
+                payload["asset_manager"], AssetManager
+            )
         for f in state.firms:
             f.shares_held_by_firms = float(sum(
                 tgt.get(f.id, 0.0) for tgt in state.cross_holdings.values()

@@ -73,6 +73,9 @@ def monthly_tick(
     _fire_sale_and_failure(state)         # Phase 2: fire-sale + 失败处置
     _stock_market_cycle(state)            # Week C: BH 股票市场 (默认关闭)
     _household_rebalance(state)           # Week C M2: risk_tolerance 组合再平衡
+    _asset_manager_cycle(state)           # Week D: 申购赎回 + 被动抛售 (先跑, 其抛售价格冲击计入 IB 对账)
+    _investment_bank_cycle(state)         # Week D: VaR 去杠杆 + repo (默认关闭)
+    _reconcile_nbfi(state)                # Week D: 收盘资本对账 (浮点卫生)
     _aggregate_macros(state)
     # Week B: 销售/需求历史入档 (劳动需求决策的滞后输入; 保留 13 个月窗口)
     for f in state.firms:
@@ -1064,6 +1067,318 @@ def _household_rebalance(state: SimulationState) -> None:
         h.stock_units -= sell_units
         h.deposits += sell_units * price
         done_sell += sell_units * price
+
+
+
+def _cross_trade_with_households(
+    state: SimulationState,
+    nbfi_buys_value: float,
+    price: float,
+) -> None:
+    """NBFI 与家庭部门的指数交易清算 (单位 + 现金 双镜像).
+
+    nbfi_buys_value > 0: NBFI 买入 — 家庭出让单位并收到等额存款;
+    < 0: NBFI 卖出 — 家庭受让单位并支付存款.
+    银行两侧科目同额对冲 (nbfi 与 hh), 恒等式零净影响.
+    调用方需在银行账上同步 nbfi ±value 与 hh ∓value... 即:
+        bank.deposits_from_nbfi ±= |value|
+        bank.deposits_from_hh   ∓= |value|
+    本函数负责家庭分户的逐位精确划转, 并返回**家庭端实际成交金额**
+    (受家庭持仓/存款上限截断时可能小于名义额); 调用方必须以返回值做
+    银行科目镜像, 不能用名义额.
+    """
+    held_total = sum(h.stock_units for h in state.households)
+    dep_total = sum(h.deposits for h in state.households)
+    units_total = abs(nbfi_buys_value) / max(price, 1e-9)
+    done_u = 0.0
+    done_v = 0.0
+    if nbfi_buys_value > 0:
+        # 家庭卖单位收现金: 按持仓比例卖, 上限 = 各户持仓
+        denom = max(held_total, 1e-9)
+        allocs = [
+            min(units_total * h.stock_units / denom,
+                float(h.stock_units))
+            for h in state.households
+        ]
+        deficit = units_total - sum(allocs)
+        if deficit > 1e-9:
+            return 0.0                        # 家庭吸收能力不足 → 零成交
+        for i, h in enumerate(state.households):
+            u = allocs[i]
+            v = min(u * price, max(0.0, h.deposits) + u * price)
+            v = u * price                     # 卖出必收款 (现金不受限)
+            h.stock_units -= u
+            h.deposits += v
+            done_u += u
+            done_v += v
+    else:
+        # 家庭买单位付现金: 按存款比例买, 上限 = 各户存款可负担量
+        denom = max(dep_total, 1e-9)
+        allocs = [
+            min(units_total * h.stock_units / denom,
+                h.deposits / max(price, 1e-9))
+            for h in state.households
+        ]
+        deficit = units_total - sum(allocs)
+        if deficit > 1e-9:
+            return 0.0
+        for i, h in enumerate(state.households):
+            u = allocs[i]
+            cost = min(u * price, h.deposits)
+            h.stock_units += u
+            h.deposits -= cost
+            done_u += u
+            done_v += cost
+    return done_v
+
+
+def _shift_units_household_to(state: SimulationState, units: float) -> None:
+    """把 units 单位指数在家庭部门按持仓比例划转 (NBFI 交易对手方).
+
+    units>0: 家庭整体受让; units<0: 家庭整体出让.
+    对价现金的科目镜像由调用方完成 (hh ↔ nbfi 等额对冲).
+    """
+    held_total = sum(h.stock_units for h in state.households)
+    if held_total <= 1e-9 or abs(units) < 1e-12:
+        return
+    n = len(state.households)
+    done = 0.0
+    for i, h in enumerate(state.households):
+        share_u = (
+            units * h.stock_units / held_total
+            if i < n - 1
+            else units - done
+        )
+        h.stock_units = max(0.0, h.stock_units + share_u)
+        done += share_u
+
+
+# ════════════════════════════════════════════════════════════
+# Week D-1: 投行周期 — VaR 目标仓位 / repo 融资 / 强制去杠杆
+# ════════════════════════════════════════════════════════════
+def _investment_bank_cycle(state: SimulationState) -> None:
+    """投行以资本为底仓加杠杆持有指数; 波动率↑ → 目标杠杆↓ → 卖出.
+
+    SFC 注记 (镜像与做市商池语义一致):
+      - NBFI 交易对手方是市场池 → 变动镜像 bank.deposits_from_nbfi
+      - 回购 = 银行向投行放贷: bank.deposits_from_nbfi ↑X ↔
+        ib.deposits ↑X, ib.repo_debt ↑X
+      - 利息 (policy+spread): 现金付则双向减; 拖欠则资本化并同时记
+        银行利息收入 (book_loan_interest_income)
+    """
+    ib = state.investment_bank
+    if not bool(_cfg(state, "enable_investment_bank", False)) or ib is None:
+        return
+    mkt = state.stock_market
+    if mkt is None or getattr(mkt, "supply_units", 0.0) <= 0:
+        return
+    price = max(mkt.price, 1e-9)
+    bank = state.bank
+    cb = state.central_bank
+    assert bank is not None
+    assert cb is not None
+
+    hist = list(ib.return_history) if ib.return_history else []
+    ret = (
+        mkt.price_history[-1] / mkt.price_history[-2] - 1.0
+        if len(mkt.price_history) >= 2 else 0.0
+    )
+    ib.update_vol(ret)
+    hist.append(ret)
+    ib.return_history = hist[-13:]
+
+    # 1. 调仓到 VaR 目标仓位; 对手方 = 家庭部门 (银行内科目对冲零净额):
+    #    IB 买 C 元: nbfi_dep −C ↔ hh_dep +C (家庭让渡单位); 卖出反向.
+    target_value = ib.desired_position(price)
+    want_units = target_value / price - ib.stock_units
+    max_units = (
+        float(_cfg(state, "stock_order_fraction", 0.15))
+        * 12 * ib.capital / price
+    )
+    du = max(-max_units, min(max_units, want_units))
+    if abs(du) > 1e-9:
+        value = abs(du) * price
+        if du > 0:
+            pay = min(value, ib.deposits)
+            if pay > 1e-9:
+                filled = _cross_trade_with_households(state, pay, price)
+                pay = min(pay, filled)
+                ib.deposits -= pay
+                ib.stock_units += pay / price
+                bank.deposits_from_nbfi -= pay
+                bank.deposits_from_hh += pay
+        else:
+            nominal_cash = abs(du) * price
+            filled = _cross_trade_with_households(
+                state, -nominal_cash, price
+            )
+            if filled <= 1e-9:
+                pass                          # 家庭吸收不足 → 本期不调仓卖出
+            else:
+                sell = filled / price
+                cash = filled
+                ib.stock_units -= sell
+                ib.deposits += cash
+                bank.deposits_from_nbfi += cash
+                bank.deposits_from_hh -= cash
+
+    # 2. 回购融资: 把持仓超出资本的部分用 repo 支撑 (受 leverage_max 限制)
+    pos_val = ib.position_value(price)
+    repo_target = min(
+        max(0.0, pos_val - ib.capital),
+        float(_cfg(state, "ib_leverage_max", 5.0)) * ib.capital,
+    )
+    d_repo = repo_target - ib.repo_debt
+    if d_repo > 1e-9:
+        ib.repo_debt += d_repo
+        ib.deposits += d_repo
+        bank.deposits_from_nbfi += d_repo       # 银行放贷创造存款 (负债)
+        bank.repo_claims += d_repo              # 银行的回购债权 (资产) ✓
+    elif d_repo < -1e-9:
+        repay = min(-d_repo, ib.repo_debt, ib.deposits)
+        ib.repo_debt -= repay
+        ib.deposits -= repay
+        bank.deposits_from_nbfi -= repay
+        bank.repo_claims = max(0.0, bank.repo_claims - repay)
+
+    # 3. 回购利息
+    rate = cb.policy_rate + float(_cfg(state, "ib_repo_spread", 0.01))
+    interest = ib.repo_debt * rate / 12.0
+    if interest > 1e-12:
+        paid_cash = min(interest, ib.deposits)
+        ib.deposits -= paid_cash
+        capitalized = interest - paid_cash
+        ib.repo_debt += capitalized
+        bank.deposits_from_nbfi -= paid_cash
+        bank.book_loan_interest_income(interest)
+        bank.repo_claims += capitalized          # 资本化利息同步加债权
+
+    # 资本对账 (浮点卫生): 市值变动已体现在资产端, 由恒等式给出
+    implied_capital = ib.deposits + ib.position_value(price) - ib.repo_debt
+    drift = implied_capital - ib.capital
+    if abs(drift) < 1e-6:
+        ib.capital = implied_capital
+    else:
+        logger.warning(
+            f"IB capital drift {drift:.4f} at t={state.t}; 已对账修复"
+        )
+        ib.capital = implied_capital
+
+    # 5. 强平: margin 缺口 → 卖出持仓还回购直到比率恢复或卖无可卖
+    gap = ib.margin_call_gap(price)
+    if gap > 1e-9 and ib.stock_units > 0:
+        ib.is_deleveraging = True
+        impact = float(_cfg(state, "fire_sale_price_impact", 0.05))
+        while True:
+            assets = ib.deposits + ib.position_value(price)
+            req = float(_cfg(state, "ib_margin_requirement", 0.08)) * assets
+            need = max(0.0, req - ib.capital)
+            if need <= 1e-9 or ib.stock_units <= 1e-12:
+                break
+            units_needed = min(ib.stock_units, need / price * 1.5 + 1e-9)
+            cash = units_needed * price
+            ib.stock_units -= units_needed
+            ib.deposits += cash
+            bank.deposits_from_nbfi += cash
+            # fire-sale 价格冲击 (Brunnermeier-Pedersen: 抛售压价)
+            press = impact * min(1.0, units_needed /
+                                 max(mkt.depth_scale(), 1e-9))
+            mkt.price *= 1.0 - min(0.10, press)
+            price = max(mkt.price, 1e-9)
+            # 还回购 (强平期加速还款)
+            repay = min(ib.repo_debt, ib.deposits)
+            ib.repo_debt -= repay
+            ib.deposits -= repay
+            bank.deposits_from_nbfi -= repay
+            bank.repo_claims = max(0.0, bank.repo_claims - repay)
+        implied = ib.deposits + ib.position_value(price) - ib.repo_debt
+        ib.capital = implied
+
+
+# ════════════════════════════════════════════════════════════
+# Week D-2: 资管周期 — 动量申购 / 业绩赎回 / 被动抛售
+# ════════════════════════════════════════════════════════════
+def _asset_manager_cycle(state: SimulationState) -> None:
+    """基金赎回螺旋骨架: 净值下跌 → 赎回 → 被动卖出压价 → 更多赎回.
+
+    本里程碑 AM 直接与市场池交互 (家庭端资金流接入留下一里程碑).
+    记账同投行: 全部镜像 bank.deposits_from_nbfi.
+    """
+    am = state.asset_manager
+    if not bool(_cfg(state, "enable_asset_manager", False)) or am is None:
+        return
+    mkt = state.stock_market
+    if mkt is None or getattr(mkt, "supply_units", 0.0) <= 0:
+        return
+    if am.fund_units_outstanding <= 1e-9:
+        return
+    price = max(mkt.price, 1e-9)
+    bank = state.bank
+    assert bank is not None
+
+    nav_prev = (
+        am.nav_history[-1] if am.nav_history else am.nav(price)
+    )
+    nav_ret = am.nav(price) / max(nav_prev, 1e-9) - 1.0
+
+    # 风险预算驱动的再平衡 (家庭端申赎接线留下一里程碑):
+    # 净值下跌 → 提高现金缓冲比例 → 被动卖出压价 → NAV 再跌 (螺旋核)
+    base_rr = float(_cfg(state, "am_base_redemption_rate", 0.02))
+    sens = float(_cfg(state, "am_redemption_sensitivity", 1.5))
+    cash_buffer_target = min(
+        0.60,
+        base_rr + sens * max(0.0, -nav_ret),
+    )
+    total_assets = max(am.assets_value(price), 1e-9)
+    current_buffer = am.deposits / total_assets
+    gap_value = (cash_buffer_target - current_buffer) * total_assets
+
+    if gap_value > 1e-9 and am.stock_units > 1e-9:
+        # 风控性减仓 (被动抛售): fire-sale 压价 → 正反馈通道.
+        # 对手方 = 家庭部门 (银行内科目对冲).
+        impact = float(_cfg(state, "fire_sale_price_impact", 0.05))
+        nominal = min(gap_value, am.stock_units * price)
+        filled = _cross_trade_with_households(state, -nominal, price)
+        sell_units = filled / price
+        am.stock_units -= sell_units
+        am.deposits += filled
+        bank.deposits_from_nbfi += filled
+        bank.deposits_from_hh -= filled
+        press = impact * min(1.0, sell_units / max(mkt.depth_scale(), 1e-9))
+        mkt.price *= 1.0 - min(0.10, press)
+    elif gap_value < -1e-9:
+        # 现金缓冲超配 → 缓慢回归市场 (买回, 每月至多一半缺口)
+        buy_value = min(-gap_value * 0.5, am.deposits)
+        if buy_value > 1e-9:
+            filled = _cross_trade_with_households(state, buy_value, price)
+            buy_value = min(buy_value, filled)
+            am.deposits -= buy_value
+            am.stock_units += buy_value / price
+            bank.deposits_from_nbfi -= buy_value
+            bank.deposits_from_hh += buy_value
+    am.redemption_rate = cash_buffer_target  # 教学诊断口径: 目标缓冲率
+
+    nav_hist = list(am.nav_history) if am.nav_history else []
+    nav_hist.append(am.nav(max(mkt.price, 1e-9)))
+    am.nav_history = nav_hist[-13:]
+
+
+# ════════════════════════════════════════════════════════════
+# Week D: NBFI 收盘资本对账
+# ════════════════════════════════════════════════════════════
+def _reconcile_nbfi(state: SimulationState) -> None:
+    """收盘时把 IB 的资本按恒等式重标 (价格已定, 浮点卫生口径).
+
+    经科目镜像校验器拦截真正的记账 bug (drift 大于浮点尾差会告警).
+    """
+    ib = getattr(state, "investment_bank", None)
+    if ib is None:
+        return
+    price = max(getattr(state.stock_market, "price", 0.0) or 0.0, 1e-9)
+    implied = ib.deposits + ib.stock_units * price - ib.repo_debt
+    if abs(implied - ib.capital) > 1e-6 * max(1.0, abs(ib.capital)):
+        logger.warning(f"IB capital reconcile drift {implied-ib.capital:.4f}")
+    ib.capital = implied
 
 
 # REO 清算: 把银行止赎房产卖给家庭 (所有权转移, SFC 镜像)

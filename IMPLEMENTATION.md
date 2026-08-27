@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 ✅ / **Week A+B+C 全部完成 ✅** (下一站: Week D 投行+资管)
+> 状态：Phase 0-2 ✅ / Phase 3 前置 ✅ / Week A+B+C ✅ / **Week D-M1 ✅ (投行+资管骨架, 默认关闭)**
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,29 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 291 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+**测试基线**: 301 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+
+### Phase 3 Week D 里程碑 1: 投行 + 资管 + FSIC 扩展（2026-08-27 完成）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **FSIC 扩展** | ✅ | 新增 `InvestmentBankBalanceSheet`(A=L+capital) 与 `AssetManagerBalanceSheet`(A≡L 过账机构); 银行新增 NBFI 存款科目 + 回购债权资产 |
+| **D-InvestmentBank** | ✅ | 自营指数仓位; VaR 目标杠杆 (lev≤k/σ, 波动↑→目标↓ 的 A-Shin 顺周期机制); repo 融资与利息资本化; margin 强平→fire-sale 压价 |
+| **D-AssetManager** | ✅ | 现金缓冲率再平衡: NAV 下跌→提高现金目标→被动抛售压价 (螺旋核); 家庭端申赎接线留下一里程碑 |
+| **SFC 第9项校验** | ✅ | IB+AM 存款 == bank.deposits_from_nbfi; repo 借贷双镜像 (bank.repo_claims == ib.repo_debt) |
+
+**Week D 关键记账教训**:
+1. repo 放贷最初漏记银行侧债权资产 → 放贷创造存款纯增负债, 银行恒等式被击穿
+   (Δ数百). 修法同历史 bug 模式——每个 L 变化必须有 A 或 capital 对手方.
+2. NBFI 与"市场池"的单边交易同样打破银行恒等式 (池子不是账户). 修正为
+   NBFI 与家庭部门直接对手交易 (`_cross_trade_with_households` 双镜像),
+   银行 hh/nbfi 两科目等额对冲零净额.
+3. helper 内 min 截断会造成家庭端实际成交 < 名义额 → 调用方必须用
+   **返回的实际成交额**做镜像, 不能用名义额.
+
+Week D 后续里程碑: 家庭端基金申赎接线 (赎回螺旋闭环);
+i-bank VaR 参数标定到"强平放大冲击 ≥30%"验收; fire-sale 函数完整版统一入口.
+快照 v5.
 
 ### Phase 3 Week C 里程碑 3: 交叉持股骨架（2026-08-27 完成）— Week C 收官
 

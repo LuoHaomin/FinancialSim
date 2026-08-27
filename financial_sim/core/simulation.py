@@ -354,6 +354,51 @@ class Simulation:
                             issued_to_firms.get(f.id, 0.0)
                         )
 
+        # ── Phase 3 Week D: 投行 + 资管 (须先开启股票市场) ──
+        investment_bank = None
+        asset_manager = None
+        if stock_market is not None:
+            if bool(getattr(config, "enable_investment_bank", False)):
+                from financial_sim.agents.investment_bank import InvestmentBank
+                ib_cap_total = float(
+                    getattr(config, "ib_initial_capital_per_hh", 1.0)
+                ) * n_hh
+                # 家庭按存款比例认购投行资本:
+                #   h.deposits ↓ / bank.deposits_from_hh ↓
+                #   ib.deposits ↑ / ib.capital ↑ /
+                #   bank.deposits_from_nbfi ↑     (科目转移, 恒等式保持)
+                distributed = 0.0
+                n_hhs = len(households)
+                for i, h in enumerate(households):
+                    pay = min(
+                        (
+                            ib_cap_total * h.deposits / hh_total_deposits
+                            if hh_total_deposits > 0 else 0.0
+                        ) if i < n_hhs - 1 else ib_cap_total - distributed,
+                        h.deposits,
+                    )
+                    h.deposits -= pay
+                    distributed += pay
+                investment_bank = InvestmentBank.from_config(config)
+                investment_bank.deposits = distributed
+                investment_bank.capital = distributed
+                bank.deposits_from_hh -= distributed
+                bank.deposits_from_nbfi += distributed
+
+            if bool(getattr(config, "enable_asset_manager", False)):
+                from financial_sim.agents.asset_manager import AssetManager
+                beta_am = float(
+                    getattr(config, "am_share_of_hh_units", 0.30)
+                )
+                asset_manager = AssetManager.from_config(config)
+                # 家庭按比例把持仓过户给基金换份额 (NAV 平价, 零现金流):
+                #   h.stock_units ↓ / am.stock_units ↑ / 基金份额 ↑
+                for h in households:
+                    swapped = h.stock_units * beta_am
+                    h.stock_units -= swapped
+                    asset_manager.stock_units += swapped
+                    asset_manager.fund_units_outstanding += swapped
+
         return SimulationState(
             t=0,
             config=config,
@@ -382,6 +427,8 @@ class Simulation:
             cross_holdings=cross_edges if bool(
                 getattr(config, "enable_cross_holdings", False)
             ) else {},
+            investment_bank=investment_bank,
+            asset_manager=asset_manager,
         )
 
     # ════════════════════════════════════════════════════════════

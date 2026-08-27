@@ -188,6 +188,19 @@ class SimConfig(BaseModel):
     cross_hold_beta: float = 0.2             # 发行人划给企业股东的股数比例
     cross_hold_m_links: int = 2              # 每发行人持有的持有人连接数 (BA)
 
+    # ── Week D: 投行 + 资管 (需 enable_stock_market=True) ──
+    enable_investment_bank: bool = False    # 默认关闭
+    enable_asset_manager: bool = False      # 默认关闭
+    ib_initial_capital_per_hh: float = 1.0  # 每户认购的投行资本 (元)
+    ib_leverage_max: float = 5.0            # 名义杠杆上限
+    ib_margin_requirement: float = 0.08     # capital/assets 强平线
+    ib_var_budget: float = 2.0              # VaR 预算系数 (lev ≤ k/σ)
+    ib_repo_spread: float = 0.01            # 回购利率 = policy + spread
+    am_share_of_hh_units: float = 0.30      # 初始代客管理的家庭持仓比例
+    am_base_redemption_rate: float = 0.02   # 基础月赎回率
+    am_redemption_sensitivity: float = 1.5  # 赎回率对负收益敏感度
+    am_subscription_momentum: float = 0.01  # 正动量时的申购率
+
     # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
     enable_firm_dividends: bool = True
     firm_dividend_payout: float = 0.40        # 每月对"工资单倍数以上"现金的分红比例

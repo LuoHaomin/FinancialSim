@@ -143,6 +143,10 @@ class StockMarket:
             return self.price
         return max(annual_dividend_per_share, 0.0) / self.discount_rate
 
+    def depth_scale(self) -> float:
+        """fire-sale 冲击的规模分母 (约 2% 总供给为满格冲击)."""
+        return max(self.supply_units * 0.02, 1.0)
+
     def _ma_price(self) -> float:
         window = MEAN_REV_WINDOW
         seg = self.price_history[-window:]

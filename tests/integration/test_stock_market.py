@@ -70,7 +70,7 @@ class TestStockMarketAcceptance:
 
 
 class TestStockSnapshot:
-    def test_snapshot_v4_roundtrip_with_market(self):
+    def test_snapshot_roundtrip_with_market(self):
         import tempfile
         from pathlib import Path
 
@@ -85,8 +85,9 @@ class TestStockSnapshot:
             assert st2.stock_market.price > 0
             assert sum(len(v) for v in st2.sfc_violations) == 0
 
-    def test_version_is_4(self):
-        assert SNAPSHOT_VERSION == 4
+    def test_version_at_least_4(self):
+        # v4 (股票) 之后 v5 追加 NBFI; 允许向后演进
+        assert SNAPSHOT_VERSION >= 4
 
 
 class TestPortfolioChoiceM2:

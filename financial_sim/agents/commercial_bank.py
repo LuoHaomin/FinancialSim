@@ -31,10 +31,12 @@ class CommercialBank:
     interbank_claims: float = 0.0         # 同业拆出 (Phase 2)
     reo_value: float = 0.0                # 止赎房产账面值 (实物资产, 清算价入账)
     seized_assets: float = 0.0            # 破产企业清算资产接收值 (Phase 3 Week A)
+    repo_claims: float = 0.0             # 回购融出债权 (Week D: 对投行)
 
     # ── 负债 ──
     deposits_from_hh: float = 0.0
     deposits_from_firms: float = 0.0
+    deposits_from_nbfi: float = 0.0       # 非银金融机构存款 (Week D: i-bank/资管)
     interbank_debt: float = 0.0           # 同业拆入 (Phase 2)
     lolr_debt: float = 0.0                # 最后贷款人债务 (Phase 2)
 
@@ -70,12 +72,14 @@ class CommercialBank:
             + self.interbank_claims
             + self.reo_value
             + self.seized_assets
+            + self.repo_claims
         )
 
     def total_liabilities(self) -> float:
         return (
             self.deposits_from_hh
             + self.deposits_from_firms
+            + self.deposits_from_nbfi
             + self.interbank_debt
             + self.lolr_debt
         )

@@ -162,6 +162,22 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
                 f"Δ={diff:.4f}"
             )
 
+    # ─── 9. NBFI 存款一致性 (Week D: 投行+资管在商行的存款) ───
+    ib = balance_sheets.get("investment_bank")
+    am = balance_sheets.get("asset_manager")
+    if b is not None and (ib is not None or am is not None):
+        nbfi_dep = (
+            (ib.deposits if ib is not None else 0.0)
+            + (am.deposits if am is not None else 0.0)
+        )
+        mirror = getattr(b, "deposits_from_nbfi", 0.0)
+        diff = nbfi_dep - mirror
+        if abs(diff) > _tolerance(nbfi_dep, mirror):
+            errors.append(
+                f"NBFI deposit mismatch: IB+AM deposits={nbfi_dep} "
+                f"!= Banks.deposits_from_nbfi={mirror} Δ={diff:.4f}"
+            )
+
     return errors
 
 

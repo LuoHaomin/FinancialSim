@@ -114,9 +114,11 @@ class CommercialBankBalanceSheet:
     interbank_claims: float = 0.0
     reo_value: float = 0.0          # 止赎房产 (实物资产, 按清算价入账)
     seized_assets: float = 0.0      # 破产企业清算资产接收值 (Phase 3 Week A)
+    repo_claims: float = 0.0        # 回购融出债权 (Week D)
     # ── 负债 ──
     deposits_from_hh: float = 0.0
     deposits_from_firms: float = 0.0
+    deposits_from_nbfi: float = 0.0     # 非银金融机构存款 (Week D)
     interbank_debt: float = 0.0
     bonds_issued: float = 0.0
     # ── 资本 ──
@@ -126,13 +128,15 @@ class CommercialBankBalanceSheet:
         return (
             self.reserves + self.loans_to_firms + self.loans_to_households
             + self.gov_bonds_held + self.interbank_claims + self.reo_value
-            + self.seized_assets
+            +self.seized_assets
+            + getattr(self, 'repo_claims', 0.0)
         )
 
     def sum_liabilities(self) -> float:
         return (
             self.deposits_from_hh + self.deposits_from_firms
-            + self.interbank_debt + self.bonds_issued
+            + self.deposits_from_nbfi + self.interbank_debt
+            + self.bonds_issued
         )
 
     @property
@@ -195,6 +199,64 @@ class CentralBankBalanceSheet:
 
     def sum_liabilities(self) -> float:
         return self.bank_reserves + self.currency_issued + self.treasury_deposits
+
+    @property
+    def net_worth(self) -> float:
+        return self.capital
+
+
+# ════════════════════════════════════════════════════════════
+# Phase 3 Week D: NBFI 部门 (A = L + capital 资本追踪型)
+# ════════════════════════════════════════════════════════════
+@dataclass
+class InvestmentBankBalanceSheet:
+    """投资银行资产负债表.
+
+    资产: 存款(在商行)、持仓市值
+    负债: 回购融资
+    资本独立追踪: A = L + capital
+    """
+
+    # ── 资产 ──
+    deposits: float = 0.0            # 在商业银行的存款
+    stocks: float = 0.0              # 指数持仓市值
+    # ── 负债 ──
+    repo_debt: float = 0.0           # 回购融资余额
+    # ── 资本 ──
+    capital: float = 0.0
+
+    def sum_assets(self) -> float:
+        return self.deposits + self.stocks
+
+    def sum_liabilities(self) -> float:
+        return self.repo_debt
+
+    @property
+    def net_worth(self) -> float:
+        return self.capital
+
+
+@dataclass
+class AssetManagerBalanceSheet:
+    """资产管理资产负债表.
+
+    代理家庭持仓: 资产 = 现金池 + 持仓市值; 负债 = 基金份额 NAV.
+    无自有资本 (收手续费前简化为过账机构): A == L, capital ≡ 0.
+    """
+
+    # ── 资产 ──
+    deposits: float = 0.0            # 现金缓冲池
+    stocks: float = 0.0              # 代客持仓市值
+    # ── 负债 ──
+    fund_nav_liability: float = 0.0  # 基金份额对家庭的赎回权 (按 NAV 计)
+    # ── 资本 ──
+    capital: float = 0.0
+
+    def sum_assets(self) -> float:
+        return self.deposits + self.stocks
+
+    def sum_liabilities(self) -> float:
+        return self.fund_nav_liability
 
     @property
     def net_worth(self) -> float:
