@@ -56,6 +56,8 @@ def create_app() -> FastAPI:
         rs = registry.get(sim_id)
         if rs is None:
             raise HTTPException(404, f"仿真不存在: {sim_id}")
+        import time as _t
+        rs.last_used = _t.time()      # 触碰活跃时间, 供空闲回收判定
         return rs
 
     def _validate_shock(channel: str, magnitude: float) -> None:

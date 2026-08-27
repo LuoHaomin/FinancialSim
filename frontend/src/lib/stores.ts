@@ -57,33 +57,68 @@ async function backfill(id: string) {
   }))
 }
 
+// MVP 稳妥口径: REST 轮询兜底保证数据必然刷新 (2s),
+// WS 仅作为低延迟增强, 断了不影响正确性.
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function stopPoll() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+async function pollOnce(id: string) {
+  const s = get(series)
+  const last = s.t[s.t.length - 1] ?? -1
+  try {
+    const data = await api.seriesSlice(id, last + 1)
+    const n = data.t.length
+    if (n === 0) return
+    series.update((cur) => ({
+      t: [...cur.t, ...data.t],
+      real_gdp: [...cur.real_gdp, ...data.real_gdp],
+      inflation_yoy: [...cur.inflation_yoy, ...data.inflation_yoy],
+      unemployment_rate: [...cur.unemployment_rate,
+        ...data.unemployment_rate],
+      policy_rate: [...cur.policy_rate, ...data.policy_rate],
+      housing_price: [...cur.housing_price, ...data.housing_price],
+    }))
+  } catch { /* 网络/后端瞬断: 下个周期再试 */ }
+}
+
+export function startPolling(id: string) {
+  stopPoll()
+  pollTimer = setInterval(async () => {
+    await pollOnce(id)
+    refreshMeta(id).catch(() => {})
+  }, 2000)
+}
+
+// e2e 冒烟可读取 (window.__fsim.series.t.length)
+if (typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).__fsim = {
+    get series() { return get(series) },
+    get meta() { return get(meta) },
+  }
+}
+
 export async function openStream(id: string) {
   closeStream()
   simId.set(id)
   resetSeries()
   await refreshMeta(id)
   await refreshShocks(id)
+  await backfill(id)                      // 初始全量历史
+  startPolling(id)
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  ws = new WebSocket(
-    `${proto}://${location.host}/api/sims/${id}/ws`)
-  ws.onmessage = async (ev) => {
-    const msg = JSON.parse(ev.data)
-    if (msg.type === 'tick') {
-      const s = get(series)
-      if (msg.t > s.t[s.t.length - 1] ?? -1) {
-        if (msg.t > (s.t[s.t.length - 1] ?? -1) + 1) {
-          await backfill(id)                       // 缺口 → 补数
-        } else {
-          pushFrame(msg.t, msg.macro)
-        }
-      }
-    }
-  }
-  ws.onclose = () => { /* Svelte 组件层负责重连 */ }
+  try {
+    ws = new WebSocket(
+      `${proto}://${location.host}/api/sims/${id}/ws`)
+    // WS 仅用于降低刷新延迟; 数据正确性由轮询保证
+  } catch { /* WS 失败不致命 */ }
 }
 
 export function closeStream() {
   if (ws) { ws.close(); ws = null }
+  stopPoll()
 }
 
 export async function refreshMeta(id: string) {

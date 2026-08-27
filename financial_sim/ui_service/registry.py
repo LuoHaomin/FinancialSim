@@ -21,6 +21,7 @@ from financial_sim.utils.logging import get_logger
 logger = get_logger(__name__)
 
 MAX_SIMS = 8
+IDLE_SIM_TTL_SECONDS = 30 * 60     # 暂停且无访问超过 30 分钟 → 自动关闭
 
 
 def _new_id() -> str:
@@ -44,6 +45,7 @@ class RunningSim:
     stop_event: threading.Event = field(default_factory=threading.Event)
     speed: float = 0.0          # ticks/秒; 0 = 暂停
     run_to: int | None = None   # 自动停在此 t
+    last_used: float = field(default_factory=time.time)
 
     @property
     def state(self):
@@ -121,6 +123,13 @@ class SimulationRegistry:
         while not rs.stop_event.is_set():
             if rs.speed <= 0:
                 next_due = time.monotonic()
+                # 空闲回收: 暂停且超过 TTL 无访问 → 自动清理 (用户痛点)
+                if time.time() - rs.last_used > IDLE_SIM_TTL_SECONDS:
+                    logger.info(f"auto-close idle sim {rs.sim_id}")
+                    rs.stop_event.set()
+                    with self._lock:
+                        self._sims.pop(rs.sim_id, None)
+                    return
                 time.sleep(0.05)
                 continue
             with rs.lock:

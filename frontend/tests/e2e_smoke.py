@@ -2,8 +2,9 @@
 
     /tmp/pwvenv/bin/python frontend/tests/e2e_smoke.py [base_url]
 """
-from playwright.sync_api import sync_playwright
 import sys
+
+from playwright.sync_api import sync_playwright
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:5173/"
 

@@ -68,6 +68,11 @@ export const api = {
   meta: (id: string) => fetch(`/api/sims/${id}`).then((r) => j<SimMeta>(r)),
   series: (id: string) =>
     fetch(`/api/sims/${id}/series`).then((r) => j<SeriesData>(r)),
+  seriesSlice: (id: string, fromT: number) =>
+    fetch(`/api/sims/${id}/series?from_t=${fromT}`)
+      .then((r) => j<SeriesData>(r)),
+  closeSim: (id: string) =>
+    fetch(`/api/sims/${id}`, { method: 'DELETE' }).then((r) => j(r)),
   command: (id: string, cmd: { speed?: number; step?: number }) =>
     fetch(`/api/sims/${id}/command`, {
       method: 'POST',

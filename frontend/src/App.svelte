@@ -5,7 +5,7 @@
   import { api, SCENARIOS, SHOCK_PRESETS } from './lib/api'
   import {
     simId, meta, paused, series, shocks,
-    openStream, refreshMeta, refreshShocks,
+    openStream, closeStream, refreshMeta, refreshShocks, resetSeries,
   } from './lib/stores'
 
   let scenario = 'baseline'
@@ -38,6 +38,16 @@
       if (!id) return
       try { await refreshMeta(id) } catch { /* 服务重启等 */ }
     }, 1000)
+  }
+
+  async function closeCurrent() {
+    const id = $simId
+    if (!id) return
+    try { await api.closeSim(id) } catch { /* 已被服务端清理 */ }
+    closeStream()
+    simId.set(null)
+    meta.set(null)
+    resetSeries()
   }
 
   async function cmd(c: { speed?: number; step?: number }) {
@@ -103,6 +113,10 @@
     <button onclick={resume} disabled={!$simId}>▶ 继续</button>
     <button onclick={pause} disabled={!$simId}>⏸ 暂停</button>
     <button onclick={stepOnce} disabled={!$simId}>单步 +1</button>
+    <span class="sep"></span>
+    <button class="danger" onclick={closeCurrent} disabled={!$simId}>
+      ✕ 关闭实例
+    </button>
   </section>
 
   {#if error}<p class="err">{error}</p>{/if}
@@ -166,6 +180,8 @@
   .chart { border: 1px solid #eee; padding: 6px; margin: 12px 0; }
   .panel { margin-top: 14px; }
   .panel h3 { margin-bottom: 6px; font-size: 1em; }
+  .danger { color: #c0392b; border-color: #e8b4b4; }
+  .danger:not(:disabled):hover { background: #ffe4e4; }
   .err { color: #c0392b; white-space: pre-wrap; }
   .hint { color: #999; font-size: .9em; }
   table { width: 100%; border-collapse: collapse; font-size: .92em; }
