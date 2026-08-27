@@ -54,6 +54,7 @@ def monthly_tick(
     for f in state.firms:
         f.last_sales = 0.0
         f.last_demand = 0.0  # 本月需求意向清零 (消费 + 政府 G 写入)
+    _supply_chain_cycle(state)            # Week E-M1: IO 中间品采购 (默认关闭)
     _pay_wages(state)
     _consumer_credit_cycle(state)         # Phase 3 前置 P0-a: 消费贷申请 + 配给 + 还款
     _household_consumption(state)
@@ -1381,6 +1382,74 @@ def _reconcile_nbfi(state: SimulationState) -> None:
     ib.capital = implied
 
 
+
+# ════════════════════════════════════════════════════════════
+# Week E-M1: 供应链 IO — 上游(能源)中间品采购 + 断供传导
+# ════════════════════════════════════════════════════════════
+def _supply_chain_cycle(state: SimulationState) -> None:
+    """下游企业按 IO 份额向能源部门采购中间品.
+
+    断供传导链: 能源产出不足 → 购买受库存约束 → input_utilization<1
+    → 下游 production() 按比例折减 (CES/线性统一在 A_eff 生效).
+
+    记账 (买卖双方镜像):
+      买方 deposits ↓V / 银行 deposits_from_firms ↓V
+      卖方 deposits ↑V / 银行 deposits_from_firms ↑V   (行内对冲零净额)
+      卖方 inventory ↓V / last_sales ↑V                (实物出库+营收)
+    """
+    if not bool(_cfg(state, "enable_supply_chain", False)):
+        return
+    bank = state.bank
+    if bank is None or not state.firms:
+        return
+    cfg = getattr(state, "config", None)
+    shares = getattr(cfg, "io_input_shares", {}) if cfg else {}
+    default_share = float(getattr(cfg, "io_input_share_default", 0.08)) \
+        if cfg else 0.08
+    suppliers = [
+        f for f in state.firms
+        if not f.is_bankrupt and (
+            "energy" in f.sector.lower() or f.sector == "energy"
+        )
+    ]
+    for f in state.firms:
+        f.input_utilization = 1.0          # 每期重置
+    if not suppliers:
+        return
+
+    warn_ratio = float(getattr(cfg, "io_capacity_warning_ratio", 0.95)) \
+        if cfg else 0.95
+    for buyer in state.firms:
+        if buyer.is_bankrupt or buyer is None or buyer in suppliers:
+            continue
+        share = float(shares.get(buyer.sector, default_share))
+        desired = share * buyer.production() * max(buyer.price, 1e-9)
+        if desired <= 1e-9:
+            continue
+        remaining = min(desired, max(buyer.deposits, 0.0))
+        received = 0.0
+        for sup in suppliers:
+            if remaining <= 1e-9:
+                break
+            v = min(remaining, sup.inventory)
+            if v <= 1e-9:
+                continue
+            # ── 镜像记账 ──
+            buyer.deposits -= v
+            bank.deposits_from_firms -= v
+            sup.deposits += v
+            bank.deposits_from_firms += v
+            sup.inventory = max(0.0, sup.inventory - v)
+            sup.last_sales += v
+            received += v
+            remaining -= v
+        util = min(1.0, received / desired) if desired > 1e-9 else 1.0
+        buyer.input_utilization = util
+        if util < warn_ratio:
+            logger.info(
+                f"  supply-chain: {buyer.id} 输入满足率 {util:.2f} "
+                f"(断供传导 → 本月产出折减)"
+            )
 # REO 清算: 把银行止赎房产卖给家庭 (所有权转移, SFC 镜像)
 # ════════════════════════════════════════════════════════════
 def _liquidate_reo(

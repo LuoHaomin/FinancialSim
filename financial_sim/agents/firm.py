@@ -41,6 +41,9 @@ class Firm:
     shares_outstanding: int = 0            # IPO 后发行股数 (0 = 未上市)
     shares_held_by_firms: float = 0.0      # 已发行到企业股东名下的股数 (M3)
     dividend_received_from_firms: float = 0.0  # 当月作为股东收到的企业分红
+
+    # ── Phase 3 Week E: 供应链 ──
+    input_utilization: float = 1.0         # 当月中游投入满足率 ∈ [0,1]
     demand_history: list[float] | None = None  # 需求意向历史 (Week B 劳动需求基准)
 
     # ── 财务 ──
@@ -75,8 +78,9 @@ class Firm:
         - ces:    Y = A × (α·K^ρ + (1−α)·L^ρ)^(1/ρ), ρ = 1 − 1/σ
           σ→∞ 时退化为线性; σ=1 时为 Cobb-Douglas A·K^α·L^(1−α) (数值守护).
         """
+        util = getattr(self, "input_utilization", 1.0)
         if self.production_function != "ces":
-            return self.productivity * self.employees
+            return self.productivity * util * self.employees
 
         rho = 1.0 - 1.0 / self.sigma_elasticity
         labor = float(max(0, self.employees))
@@ -86,10 +90,14 @@ class Firm:
             # Cobb-Douglas 数值守护
             cap_term = self.capital ** self.alpha_capital
             lab_term = labor ** (1.0 - self.alpha_capital) if labor > 0 else 0.0
-            return self.productivity * cap_term * lab_term
+            return (
+                self.productivity * getattr(self, 'input_utilization', 1.0)
+                * cap_term * lab_term
+            )
         k_term = self.alpha_capital * self.capital ** rho
         l_term = (1.0 - self.alpha_capital) * labor ** rho
-        return self.productivity * (k_term + l_term) ** (1.0 / rho)
+        eff_a = self.productivity * getattr(self, "input_utilization", 1.0)
+        return eff_a * (k_term + l_term) ** (1.0 / rho)
 
     def revenue(self) -> float:
         return self.production() * self.price

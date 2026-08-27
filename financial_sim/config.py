@@ -201,6 +201,19 @@ class SimConfig(BaseModel):
     am_redemption_sensitivity: float = 1.5  # 赎回率对负收益敏感度
     am_subscription_momentum: float = 0.01  # 正动量时的申购率
 
+    # ── Week E-M1: 供应链 IO (中间品 = 能源投入) ──
+    enable_supply_chain: bool = False        # 默认关闭
+    io_input_share_default: float = 0.08     # 各部门产量价值中能源投入占比
+    io_input_shares: dict[str, float] = Field(default_factory=lambda: {
+        "consumer_goods": 0.10,
+        "capital": 0.08,
+        "energy": 0.00,
+        "housing_services": 0.05,
+        "high_tech": 0.06,
+        "services": 0.04,
+    })
+    io_capacity_warning_ratio: float = 0.95  # 利用率低于此值告警 (教学诊断)
+
     # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
     enable_firm_dividends: bool = True
     firm_dividend_payout: float = 0.40        # 每月对"工资单倍数以上"现金的分红比例
