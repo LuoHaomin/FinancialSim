@@ -13,6 +13,8 @@ import json
 from dataclasses import asdict, fields
 from pathlib import Path
 
+import numpy as np
+
 from financial_sim.agents.central_bank import CentralBank
 from financial_sim.agents.commercial_bank import CommercialBank
 from financial_sim.agents.firm import Firm
@@ -29,7 +31,7 @@ class SnapshotError(Exception):
     """快照版本不匹配或损坏."""
 
 
-SNAPSHOT_VERSION = 3  # v3: 多企业 (firms 列表) — Phase 3 Week A
+SNAPSHOT_VERSION = 4  # v4: 股票市场 — Phase 3 Week C
 
 _AGENT_TYPES = {
     "household": Household,
@@ -42,10 +44,21 @@ _AGENT_TYPES = {
 }
 
 
+def _jsonify(v: object) -> object:
+    """递归转换不可 JSON 化的标量容器 (np.ndarray 等)."""
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    if isinstance(v, dict):
+        return {k: _jsonify(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_jsonify(x) for x in v]
+    return v
+
+
 def _to_dict(obj: object) -> dict:
     """dataclass → 可 JSON 化的 dict, 带 type 标签."""
     d = asdict(obj)  # type: ignore[arg-type]
-    return {"_type": type(obj).__name__, **d}
+    return {"_type": type(obj).__name__, **{k: _jsonify(x) for k, x in d.items()}}
 
 
 def _from_dict(d: dict, cls: type) -> object:
@@ -68,6 +81,9 @@ class StateSnapshot:
             "households": [_to_dict(h) for h in state.households],
             # v3: firms 列表 (state.firm 只是 firms[0] 的别名, 不单独存)
             "firms": [_to_dict(f) for f in state.firms],
+            "stock_market": (
+                _to_dict(state.stock_market) if state.stock_market else None
+            ),
             "bank": _to_dict(state.bank) if state.bank else None,
             "banks": [_to_dict(b) for b in state.banks],  # Phase 2: multi-bank
             "housing_market": (
@@ -132,6 +148,20 @@ class StateSnapshot:
             state.bank = _from_dict(  # type: ignore[arg-type]
                 payload["bank"], CommercialBank
             )
+        if payload.get("stock_market"):
+            from financial_sim.markets.stocks import StockMarket, Trader
+            mkt_payload = dict(payload["stock_market"])
+            traders_payload = mkt_payload.pop("traders", [])
+            state.stock_market = _from_dict(  # type: ignore[arg-type]
+                mkt_payload, StockMarket
+            )
+            state.stock_market.traders = []
+            for tp in traders_payload:
+                tp = dict(tp)
+                fitness = np.array(tp.pop("fitness"), dtype=float)
+                t = _from_dict(tp, Trader)  # type: ignore[arg-type]
+                t.fitness = fitness
+                state.stock_market.traders.append(t)
         # ── Phase 2: 住房市场 ──
         if payload.get("housing_market"):
             state.housing_market = _from_dict(  # type: ignore[arg-type]

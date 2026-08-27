@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 P0-a/b/c ✅ / **Week A ✅ / Week B ✅**
+> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 ✅ / Week A ✅ / Week B ✅ / **Week C 里程碑 1 ✅ (BH 股票市场骨架, 默认关闭)**
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,34 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 255 passed · 1 xfail · ruff clean · 单部门/6部门/紧缩衰退/危机场景零 SFC 违反
+**测试基线**: 273 passed · 1 xfail · ruff clean · 全部场景零 SFC 违反
+
+### Phase 3 Week C 里程碑 1: Brock-Hommes 股票市场（2026-08-27 完成）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **C-1 BH 引擎** | ✅ | `markets/stocks.py`: 7 条信念规则 + Trader + 做市商出清; 子步循环近似日级 (`stock_substeps_per_month=4`, Q9 性能阀) |
+| **C-2 IPO + 持仓** | ✅ | 企业发行 `shares_outstanding`; 家庭按存款比例认购; 票面价锚 (账面权益≤0 时 `stock_par_price`) |
+| **C-3 分红锚定** | ✅ | `_firm_dividend_cycle` 改按持股分配 → R2 基本面规则有真实股息锚 (`state.last_month_dividends`) |
+| **C-4 SFC 结算** | ✅ | 二级市场只在家庭部门内部轧平: 只结算净流 (deposit↔units 镜像), 估值重估不入账 |
+| 快照 v4 | ✅ | stock_market 序列化含 Trader fitness ndarray |
+
+**关键设计取舍** (记录避免重蹈):
+1. **fitness 从"预测误差"改为"虚拟盈亏"**: 原版只给被选用规则记 −|偏差|,
+   远离价格的基本面规则永远得不到正反馈 → 市场无锚. 虚拟 P&L
+   (`score_k = sign(pred_k−p_old)×r`) 让系统性低估时的买入信号持续积累,
+   价值发现通道才能打开.
+2. **微观数量级需实证标定**: 订单尺寸/深度/λ 的初值差了两个数量级 (价格钉死),
+   直接网格搜索定标: λ=0.40, depth=10, order_fraction=0.15
+   → 年化波动 ~12%, kurtosis 3.2-3.4 (>3 厚尾 ✓), 价格向基本面缓慢收敛.
+
+**Week C 验收实测**: enable_stock_market=True 三种子 48 月:
+零 SFC 违反; 持仓守恒 = 总股数; Σhh.deposits 与银行镜像逐位一致;
+厚尾 kurtosis≥3; 同种子逐位复现; 快照 v4 roundtrip.
+
+**Week C 后续里程碑** (留待继续): 家庭组合选择 risk_tolerance 化;
+交叉持股骨架 (Scale-Free 图); 波动聚集 autocorr 校准入套件;
+日级循环性能实测 (Q9).
 
 ### Phase 3 Week B: 劳动市场跨部门流动 + 失业深化（2026-08-27 完成）
 

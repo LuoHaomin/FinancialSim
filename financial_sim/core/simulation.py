@@ -14,6 +14,7 @@ from financial_sim.core.step import monthly_tick
 from financial_sim.expectations.inflation import InflationExpectation
 from financial_sim.markets.bonds import BondMarket
 from financial_sim.markets.housing import HousingMarket
+from financial_sim.markets.stocks import StockMarket
 from financial_sim.network.interbank import InterbankNetwork
 from financial_sim.simulation.events import EventManager, build_event_manager
 from financial_sim.simulation.rng import RNGManager
@@ -290,6 +291,39 @@ class Simulation:
                 ),
             )
 
+        # ── Phase 3 Week C: 股票市场 + IPO ──
+        # 每家企业发行 firm_shares_outstanding 股; 全部由家庭部门按存款比例
+        # 认购 (初始为账面置换: 家庭存款→持仓, IPO 价 = 账面权益/股).
+        # ⚠️ SFC 简化约定 (文档化): 建模上视股票由家庭"在初始时刻以既存财富
+        # 交换取得", 初始不产生银行科目变动 — 与住房"既存资产"同一处理.
+        stock_market: StockMarket | None = None
+        if bool(getattr(config, "enable_stock_market", False)):
+            shares_per_firm = int(getattr(config, "firm_shares_outstanding", 500))
+            total_supply = shares_per_firm * len(firms)
+            for f in firms:
+                f.shares_outstanding = shares_per_firm
+            hh_dep_init = sum(h.deposits for h in households)
+            if total_supply > 0 and hh_dep_init > 0:
+                book_equity = sum(
+                    max(0.0, f.deposits + f.inventory + f.capital - f.debt)
+                    for f in firms
+                )
+                stock_market = StockMarket.from_config(
+                    config, traders_n=int(getattr(config, "n_stock_traders", 12))
+                )
+                stock_market.supply_units = float(total_supply)
+                par = float(getattr(config, "stock_par_price", 10.0))
+                ipo_price = (
+                    book_equity / total_supply
+                    if book_equity > 0 else par      # 账面权益为零时用票面锚
+                )
+                stock_market.price = max(ipo_price, 0.01)
+                stock_market.price_history.append(stock_market.price)
+                for h in households:
+                    h.stock_units = (
+                        total_supply * h.deposits / hh_dep_init
+                    )
+
         return SimulationState(
             t=0,
             config=config,
@@ -314,6 +348,7 @@ class Simulation:
             housing_price=housing.price if housing else 200.0,
             interbank_network=interbank,
             bond_market=bond_market,
+            stock_market=stock_market,
         )
 
     # ════════════════════════════════════════════════════════════

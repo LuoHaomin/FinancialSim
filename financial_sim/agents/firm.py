@@ -36,6 +36,9 @@ class Firm:
     last_sales: float = 0.0               # 上月实际销售额 (定价/库存基准, step 层写入)
     last_demand: float = 0.0              # 上月总需求意向 (含库存不足未成交部分)
     sales_history: list[float] | None = None  # 销售额历史 (Week B 劳动需求基准)
+
+    # ── Phase 3 Week C: 股权 ──
+    shares_outstanding: int = 0            # IPO 后发行股数 (0 = 未上市)
     demand_history: list[float] | None = None  # 需求意向历史 (Week B 劳动需求基准)
 
     # ── 财务 ──

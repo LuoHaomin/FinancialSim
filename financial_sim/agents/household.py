@@ -68,6 +68,9 @@ class Household:
     credit_denied_months: int = 0           # 连续被信贷配给拒绝的月数 (教学诊断)
     bonds: float = 0.0                     # 持有国债面值
 
+    # ── Phase 3 Week C: 股票持仓 ──
+    stock_units: float = 0.0               # 持有股票指数单位数
+
     def decide_consumption(self) -> float:
         """消费决策: c = mpc·Y^perm + λ·max(0, NW − buffer·Y^perm).
 

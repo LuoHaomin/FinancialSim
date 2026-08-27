@@ -163,6 +163,19 @@ class SimConfig(BaseModel):
     labor_wage_adjust_freq: int = 6       # 工资调整频率(月)
     labor_wage_phillips_coeff: float = 0.10  # κ: 失业缺口→工资(年率)
 
+    # ── Stock market (Phase 3 Week C): Brock-Hommes 异质信念 ──
+    enable_stock_market: bool = False     # 默认关闭 (骨架已验证 SFC 干净)
+    n_stock_traders: int = 12             # BH 交易者数量 (聚合家庭部门的代理)
+    firm_shares_outstanding: int = 500    # 每家企业发行股数 (IPO)
+    stock_par_price: float = 10.0         # IPO 票面价锚 (账面权益≤0 时使用)
+    stock_liquidity_lambda: float = 0.40  # 价格对超额需求敏感度 (每子步)
+    stock_depth: float = 10.0             # 市场深度 (订单归一化分母)
+    stock_cost_of_trading: float = 0.001  # 交易成本阈值 (预测边际才下单)
+    stock_order_fraction: float = 0.15    # 每子步订单规模上限比例
+    bh_temperature: float = 1.0           # fitness softmax 温度
+    bh_fitness_decay: float = 0.05        # 旧适应度月衰减率
+    stock_substeps_per_month: int = 4     # 月内子步数 (近似日级; Q9 性能阀)
+
     # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
     enable_firm_dividends: bool = True
     firm_dividend_payout: float = 0.40        # 每月对"工资单倍数以上"现金的分红比例

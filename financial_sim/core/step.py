@@ -17,6 +17,8 @@ validate_sfc 的 6 项检查每 tick 通过.
 """
 from __future__ import annotations
 
+import math
+
 from financial_sim.core.state import SimulationState
 from financial_sim.markets.goods import GoodsMarket
 from financial_sim.markets.labor import LaborMarket
@@ -69,6 +71,7 @@ def monthly_tick(
     _mortgage_default_check(state)        # Phase 2: 房贷违约 → 银行 NPL
     _interbank_cycle(state)               # Phase 2: 同业利息 (n_banks>1 时生效)
     _fire_sale_and_failure(state)         # Phase 2: fire-sale + 失败处置
+    _stock_market_cycle(state)            # Week C: BH 股票市场 (默认关闭)
     _aggregate_macros(state)
     # Week B: 销售/需求历史入档 (劳动需求决策的滞后输入; 保留 13 个月窗口)
     for f in state.firms:
@@ -777,20 +780,33 @@ def _firm_dividend_cycle(state: SimulationState) -> None:
     if total_div <= 0:
         return
 
-    # 家庭按存款比例分配 (与 _bank_dividend_cycle 同口径), 残差给最后一家
-    hh_total_dep = sum(h.deposits for h in state.households)
-    if hh_total_dep <= 0:
+    # 分配权重: 股市启用时按持股 (股东语义, R2 基本面锚依赖真实股息),
+    # 否则回退按存款比例. 残差给最后一户.
+    mkt = getattr(state, "stock_market", None)
+    use_shares = (
+        bool(_cfg(state, "enable_stock_market", False))
+        and mkt is not None
+        and sum(h.stock_units for h in state.households) > 0
+    )
+    weights_sum = (
+        sum(h.stock_units for h in state.households)
+        if use_shares
+        else sum(h.deposits for h in state.households)
+    )
+    if weights_sum <= 0:
         return
     distributed = 0.0
     eligible = state.households
     for i, h in enumerate(eligible):
+        w = h.stock_units if use_shares else h.deposits
         pay = (
-            total_div * h.deposits / hh_total_dep
+            total_div * w / weights_sum
             if i < len(eligible) - 1
             else total_div - distributed
         )
         h.deposits += pay
         distributed += pay
+    state.last_month_dividends = total_div  # 下月股票市场基本面锚
 
     paid = 0.0
     for i, (f, div) in enumerate(allocs):
@@ -875,6 +891,63 @@ def _firm_capital_cycle(state: SimulationState) -> None:
 
 
 # ════════════════════════════════════════════════════════════
+# ============================================================
+# 8c. 股票市场 (Week C): Brock-Hommes 价格发现 + 家庭持仓结算
+# ============================================================
+def _stock_market_cycle(state: SimulationState) -> None:
+    """跑一个月的股票子步循环, 并把净单位流结算成家庭存款/持仓.
+
+    SFC 注记:
+    - 二级市场内部转移在家庭间轧平, 聚合存款不变 → 只结算**净流**
+    - 净买入 Q: 存款 ↓Q×p; 净卖出反向 (镜像 bank.deposits_from_hh)
+    - 审慎上限: 单月净申购 ≤ 家庭存款 × stock_order_fraction
+    """
+    mkt = state.stock_market
+    if not bool(_cfg(state, "enable_stock_market", False)):
+        return
+    if mkt is None or getattr(mkt, "supply_units", 0.0) <= 0:
+        return
+
+    mgr = getattr(state, "rng_manager", None)
+    if mgr is None:
+        return
+    rng = mgr.stream("stocks")
+
+    div_per_share = (
+        state.last_month_dividends / mkt.supply_units
+        if mkt.supply_units > 0 else 0.0
+    )
+    result = mkt.step_month(div_per_share * 12.0, rng, state)
+
+    net_units = float(result.get("net_flow_units", 0.0))
+    if abs(net_units) < 1e-9:
+        return
+    price = mkt.price
+    held_total = sum(h.stock_units for h in state.households)
+    hh_dep = sum(h.deposits for h in state.households)
+    cap = float(_cfg(state, "stock_order_fraction", 0.10))
+    cost = abs(net_units) * price
+    if net_units > 0 and cost > hh_dep * cap:
+        net_units = (hh_dep * cap) / price        # 审慎削减净申购
+    if held_total > 0 and abs(net_units) > held_total:
+        net_units = math.copysign(held_total, net_units)
+
+    settled = 0.0
+    n = len(state.households)
+    for i, h in enumerate(state.households):
+        share_u = (
+            net_units * h.stock_units / held_total
+            if held_total > 0 and i < n - 1
+            else net_units - settled              # 残差给最后一户
+        )
+        h.stock_units = max(0.0, h.stock_units + share_u)
+        h.deposits -= share_u * price             # 买+扣款 / 卖+回款
+        settled += share_u
+    bank = state.bank
+    assert bank is not None
+    bank.deposits_from_hh -= net_units * price    # 聚合镜像
+
+
 # REO 清算: 把银行止赎房产卖给家庭 (所有权转移, SFC 镜像)
 # ════════════════════════════════════════════════════════════
 def _liquidate_reo(

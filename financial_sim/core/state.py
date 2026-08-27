@@ -118,6 +118,10 @@ class SimulationState:
     # ── Phase 3 前置 P0-b: 债券市场 ──
     bond_market: BondMarket | None = None
     monthly_interest_paid: float = 0.0     # 当月付息累计 (教学诊断)
+
+    # ── Phase 3 Week C: 股票市场 ──
+    stock_market: object | None = None     # markets.stocks.StockMarket
+    last_month_dividends: float = 0.0      # 上月实发分红总额 (股息锚)
     housing_price_history: list[float] = field(default_factory=list)
     housing_expectations_factor: float = 1.0  # 房价泡沫因子 (>1 = 投机性溢价)
     fire_sale_pressure: float = 0.0      # 当前 fire-sale 强度 (0-1)
@@ -225,11 +229,13 @@ class SimulationState:
             capital = self.bank.capital
 
         housing_price = self.housing_market.price if self.housing_market else 0.0
+        stock_price = getattr(self.stock_market, "price", 0.0) or 0.0
 
         return {
             "households": HouseholdBalanceSheet(
                 cash=self.total_household_cash(),
                 deposits=self.total_household_deposits(),
+                stocks=stock_price * sum(h.stock_units for h in self.households),
                 bonds=sum(h.bonds for h in self.households),
                 housing_self=housing_price * sum(
                     min(1, h.housing_units) for h in self.households
