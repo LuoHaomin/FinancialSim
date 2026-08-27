@@ -1,6 +1,6 @@
 # ABM 宏观经济仿真器：实现计划
 
-> 状态：Phase 0 ✅ / Phase 1 ✅（核心链路）/ Phase 2 ✅（金融层扩展 + 危机涌现）
+> 状态：Phase 0 ✅ / Phase 1 ✅ / Phase 2 ✅ / Phase 3 前置 P0-a/b/c ✅
 > 最后更新：2026-08-27
 > 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
 
@@ -8,7 +8,23 @@
 
 ## 进度看板（2026-08-27 更新）
 
-**测试基线**: 199 passed · ruff clean · baseline 与危机场景均零 SFC 违反
+**测试基线**: 216 passed · 2 xfail · ruff clean · baseline 与危机场景均零 SFC 违反
+
+### Phase 3 前置批次 P0-a / P0-b / P0-c（2026-08-27 完成）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **P0-a 消费信贷** | ✅ 脚手架 | `markets/credit.py` + `ConsumerCreditMarket` + `_consumer_credit_cycle` step 函数。DTI 配给规则 + 等额本息还款. `enable_consumer_credit=False` 默认关闭 (验证通过SFC + 字段齐, 待 Phase 3 完整调) |
+| **P0-b 债券市场** | ⚠️ 脚手架, 默认关闭 | `markets/bonds.py` + `_bond_cycle` step 函数. 默认 `enable_bond_market=False` — 内部记账有未解的舍入残差, 不能安全地默认开启. 详见限制清单 #4. |
+| **P0-c 场景库** | ✅ 完整 | 4 个 YAML (`baseline`, `crisis_2008`, `tight_credit`, `loose_credit`) + `scenarios.load_scenario()` 加载器 + 8 个单测. |
+
+### 修复与 SFC 扩项（2026-08-27 一次刷）
+
+1. **REO 修复**: 旧版 `write_off_mortgage` 全额 + `h.housing_units = 0` → 房子人间蒸发. 现以清算折扣 (70%) 回收, 入 `bank.reo_value`, 房屋所有权转移给银行 (`bank.reo_properties`). 新增 ` `校验`  ` 6 项校验之 `validate_housing_stock`.
+2. **SFC 校验扩项**: 1→6 项 (新增家庭负债 / 企业贷款 / 财政部存款 / 住房存量). 之前这些字段都从校验范围之外, 一侧漂移无人察觉.
+3. **多银行初始化**: 移除 `creditor.capital += amount` 的不对称记账 (导致 ±2409 单位 BS 漂移). 主银行持有部门聚合资金流, 外围银行初始 reserves=0, **同业敞口挂起留给 Phase 3 Week E**.
+4. **Rounding 残差**: 1000+ 家庭等比分摊 1e-3 量级数字时产生 <1e-9 累积误差. 现按"最后一人吃下残差"逻辑吸收进银行资本.
+5. **卫生**: config 重复 `n_banks` → 移除; README 状态表 → 更新到 Phase 0-2 完成; 失效 xfail 标记 (`test_log_wealth_approximately_lognormal`) → 删除.
 
 ### Phase 0 — 全部完成 ✅
 Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、月度 tick、商品/劳动市场、e2e + 性能测试。
@@ -79,9 +95,11 @@ Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、�
 ### 已知建模限制（有意简化, Phase 3 修正）
 
 - 企业投资不消耗金融资源（隐含留存利润实物化假设）→ Phase 3 Week A 投资实流化关闭
-- 财政赤字 100% 由 CB 承接（无私人部门持债渠道）→ 前置批次 P0-b 关闭
+- 财政赤字 100% 由 CB 承接（无私人部门持债渠道）→ 前置批次 P0-b 部分脚手架, 完整记账留 Phase 3
 - 国债利息默认滚入本金（CB 利润上缴未建模）→ 前置批次 P0-b 部分处理, 剩余项留 Phase 5
 - 存款利率为单一聚合利率（无个体层级差异化）→ Phase 3 Week A 多主体化自然消解
+- **多银行同业敞口初始化挂起**: 临时禁用, 留给 Phase 3 Week E 重新设计主银行语义
+- **Baseline 不稳态**: G/T 比例失衡 → 政策利率贴 floor, gov debt 线性发散. Phase 3 Week A 同步修复 (G 实物化为商品需求 + 财富效应 + 银行分红出口).
 
 ---
 
@@ -216,9 +234,9 @@ Phase 3 新增模块落点见 §5 各周计划。
 
 | 序 | 模块 | 为什么是前置 | 关键文件 |
 |---|---|---|---|
-| P0-a | **消费信贷市场**（Stiglitz-Weiss 配给 + LTV/DTI） | 资管/投行的对手方是负债家庭；信贷配给逻辑会被企业融资复用 | `markets/credit.py`, `step._credit_cycle` |
-| P0-b | **债券市场**（期限结构 + 私人部门持债渠道） | 关闭"财政赤字 100% CB 承接"的建模限制；投行自营盘需要国债头寸 | `markets/bonds.py`, `monetary/policy.py` |
-| P0-c | **场景库**（scenarios/*.yaml + loader 测试） | 危机场景目前写死在测试里；Phase 3 每个里程碑都用场景验收 | `scenarios/*.yaml`, `config.py` |
+| P0-a | **消费信贷市场**（Stiglitz-Weiss 配给 + LTV/DTI） | 资管/投行的对手方是负债家庭；信贷配给逻辑会被企业融资复用 | `markets/credit.py`, `step._consumer_credit_cycle` |
+| P0-b | **债券市场**（期限结构 + 私人部门持债渠道） | 关闭"财政赤字 100% CB 承接"的建模限制；投行自营盘需要国债头寸 | `markets/bonds.py`, `step._bond_cycle` (⚠️ 默认关闭, 舍入未解) |
+| P0-c | **场景库**（scenarios/*.yaml + loader 测试） | 危机场景目前写死在测试里；Phase 3 每个里程碑都用场景验收 | `scenarios/*.yaml`, `financial_sim/scenarios.py` |
 
 **P0-b 记账规格（预先钉死）**:
 - 政府增设 treasury 存款账户（`GovernmentBalanceSheet.treasury_deposits` 字段已存在但从未使用）

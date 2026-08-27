@@ -13,6 +13,11 @@ Phase 0 检查项目:
 4. 跨部门存款一致性
 5. 跨部门现金/准备金一致性
 
+Phase 3 前置批次新增:
+6. 家庭负债 (房贷 + 消费贷) = 银行对家庭贷款
+7. 企业银行借款 = 银行对企业贷款
+8. 财政部存款 = CB 的 treasury 负债
+
 TDD: 写在实现前.
 """
 from __future__ import annotations
@@ -24,7 +29,7 @@ from financial_sim.monetary.balance_sheets import (
     GovernmentBalanceSheet,
     HouseholdBalanceSheet,
 )
-from financial_sim.monetary.sfc import validate_sfc
+from financial_sim.monetary.sfc import validate_housing_stock, validate_sfc
 
 EPSILON = 1e-6
 
@@ -35,11 +40,14 @@ def make_balanced_economy() -> dict[str, object]:
     所有跨部门债权债务互相抵消.
     不变量自检:
         Banks.A = 6300, Banks.L = 6000, Banks.capital = 300
-        CB.A    = 3000, CB.L    = 1600, CB.capital    = 1400
+        CB.A    = 3000, CB.L    = 1700, CB.capital    = 1300
         现金: HH(500) + Firms(300) = CB.currency_issued(800)
         存款: HH(4000) + Firms(2000) = Bank.deposits(4000+2000)
         准备金: Bank.reserves(800) = CB.bank_reserves(800)
-        债券: Bank.bonds(500) + CB.gov_bonds(3000) = Gov.outstanding(3500)
+        债券: HH(0) + Bank.bonds(500) + CB.gov_bonds(3000) = Gov.outstanding(3500)
+        家庭贷款: HH.mortgage(2000) = Bank.loans_to_households(2000)
+        企业贷款: Firms.bank_loans(3000) = Bank.loans_to_firms(3000)
+        财政存款: Gov.treasury_deposits(100) = CB.treasury_deposits(100)
     """
     return {
         "households": HouseholdBalanceSheet(
@@ -81,7 +89,8 @@ def make_balanced_economy() -> dict[str, object]:
             other_assets=0,
             bank_reserves=800,
             currency_issued=800,
-            capital=1400,  # 资本 = 资产 - 负债 = 3000 - 1600
+            treasury_deposits=100,  # 与 Gov.treasury_deposits 对账
+            capital=1300,  # 资本 = 资产 - 负债 = 3000 - 1700
         ),
     }
 
@@ -187,6 +196,78 @@ class TestCrossSectorConsistency:
         bs["government"].bonds_outstanding += 200  # 多发 200, 无人持有
         errors = validate_sfc(bs)
         assert any("bond" in e.lower() for e in errors)
+
+    def test_household_bond_holdings_count_toward_issuance(self):
+        """私人持债渠道 (P0-b): HH 持有的国债也要计入发行对账."""
+        bs = make_balanced_economy()
+        bs["households"].bonds += 300
+        errors = validate_sfc(bs)
+        assert any("bond" in e.lower() for e in errors), (
+            f"Expected bond mismatch when HH holdings appear out of nowhere: {errors}"
+        )
+        # 政府同步多发 300 → 重新平衡
+        bs["government"].bonds_outstanding += 300
+        assert validate_sfc(bs) == []
+
+    def test_household_loans_must_match_bank_claims(self):
+        """检查 6: 家庭房贷/消费贷余额 = 银行对家庭贷款资产.
+
+        历史缺口: 违约处置时把 h.mortgage_balance 归零而银行只核销一部分,
+        家庭负债与银行资产会静默漂移.
+        """
+        bs = make_balanced_economy()
+        bs["households"].mortgage -= 500  # 家庭这边"债务消失", 银行资产还在
+        errors = validate_sfc(bs)
+        assert any("hh loan" in e.lower() for e in errors), (
+            f"Expected HH loan mismatch, got: {errors}"
+        )
+
+    def test_consumer_loan_counts_as_household_liability(self):
+        """检查 6 覆盖消费贷 (P0-a): 只增家庭负债不增银行资产 → 报错."""
+        bs = make_balanced_economy()
+        bs["households"].consumer_loan += 400
+        errors = validate_sfc(bs)
+        assert any("hh loan" in e.lower() for e in errors)
+        # 银行同步增加对家庭债权 → 重新平衡
+        bs["banks"].loans_to_households += 400
+        bs["banks"].capital += 400  # 资产增加需要资本或负债对应
+        assert validate_sfc(bs) == []
+
+    def test_firm_loans_must_match_bank_claims(self):
+        """检查 7: 企业银行借款 = 银行对企业贷款资产."""
+        bs = make_balanced_economy()
+        bs["firms"].bank_loans -= 250
+        errors = validate_sfc(bs)
+        assert any("firm loan" in e.lower() for e in errors), (
+            f"Expected firm loan mismatch, got: {errors}"
+        )
+
+    def test_treasury_deposits_must_match_cb_liability(self):
+        """检查 8: 财政部存款 = CB 的 treasury 负债 (P0-b 前置)."""
+        bs = make_balanced_economy()
+        bs["government"].treasury_deposits += 150
+        errors = validate_sfc(bs)
+        assert any("treasury" in e.lower() for e in errors), (
+            f"Expected treasury mismatch, got: {errors}"
+        )
+
+
+class TestHousingStockConservation:
+    """实物住房存量守恒: 止赎/甩卖只是所有权转移, 房子不能蒸发."""
+
+    def test_conserved_stock_passes(self):
+        assert validate_housing_stock(950, 50, 1000) == []
+
+    def test_destroyed_reo_units_detected(self):
+        """历史 bug: fire-sale 阶段把 REO 计数归零 → 房屋人间蒸发."""
+        errors = validate_housing_stock(950, 0, 1000)
+        assert any("housing stock" in e.lower() for e in errors), (
+            f"Expected housing stock mismatch, got: {errors}"
+        )
+
+    def test_created_units_detected(self):
+        errors = validate_housing_stock(1050, 0, 1000)
+        assert len(errors) == 1
 
 
 class TestSFCReturnsList:

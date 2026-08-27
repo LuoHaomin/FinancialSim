@@ -31,8 +31,9 @@ class Government:
     # ── 债务 ──
     debt: float = 0.0
 
-    # ── 资产 (Phase 2: 救助银行形成的股权/债权) ──
-    other_assets: float = 0.0
+    # ── 资产 ──
+    treasury_deposits: float = 0.0  # 财政部在 CB 的存款账户 (P0-b)
+    other_assets: float = 0.0       # 救助银行形成的股权/债权 (Phase 2)
 
     # ── 流量 ──
     tax_revenue: float = 0.0

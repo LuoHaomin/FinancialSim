@@ -20,7 +20,7 @@ from __future__ import annotations
 from financial_sim.core.state import SimulationState
 from financial_sim.markets.goods import GoodsMarket
 from financial_sim.markets.labor import LaborMarket
-from financial_sim.monetary.sfc import validate_sfc
+from financial_sim.monetary.sfc import validate_housing_stock, validate_sfc
 from financial_sim.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -50,6 +50,7 @@ def monthly_tick(
     _cb_decisions(state)
     labor_market.clear(state)
     _pay_wages(state)
+    _consumer_credit_cycle(state)         # Phase 3 前置 P0-a: 消费贷申请 + 配给 + 还款
     _household_consumption(state)
     goods_market.update_inventory(state)
     goods_market.clear(state)  # 定价基于月末库存 (生产补充后)
@@ -58,6 +59,7 @@ def monthly_tick(
     _bank_cycle(state)
     _housing_cycle(state)                 # Phase 2: 抵押 + 房租 + 价格
     _government_cycle(state)
+    _bond_cycle(state)                    # Phase 3 前置 P0-b: 发债 + 付息
     _firm_capital_cycle(state)
     _default_resolution(state)            # Phase 1+: 违约检测 + 处置 + 恢复
     _mortgage_default_check(state)        # Phase 2: 房贷违约 → 银行 NPL
@@ -154,6 +156,105 @@ def _pay_wages(state: SimulationState) -> None:
 
 
 # ════════════════════════════════════════════════════════════
+# 3b. 消费信贷市场 (P0-a)
+# ════════════════════════════════════════════════════════════
+def _consumer_credit_cycle(state: SimulationState) -> None:
+    """家庭消费信贷循环: 申请 → 配给 → 发放 → 还款.
+
+    三步 (均在同一 tick 内):
+      A. 还款: 现有贷款的等额本息, 利息 → 银行资本, 本金 → 减贷款余额
+      B. 申请: 家庭按"流动性缺口"提出新贷请求
+      C. 配给: 银行按 DTI + lending_fraction 筛选批准
+
+    SFC 注记:
+      还款: hh.deposits ↓payment / hh.consumer_loan ↓principal
+            bank.deposits_from_hh ↓payment / bank.loans_to_hh ↓principal
+            bank.capital ↑interest (按权责发生制)
+      发放: hh.deposits ↑L / hh.consumer_loan ↑L / bank.loans_to_hh ↑L
+            bank.deposits_from_hh ↑L (凭空创造存款, 内生信用)
+    """
+    if not bool(_cfg(state, "enable_consumer_credit", False)):
+        return
+    if state.bank is None or state.central_bank is None:
+        return
+
+    bank = state.bank
+    cb = state.central_bank
+    cb_rate = cb.policy_rate if cb is not None else 0.025
+    loan_rate = cb_rate + float(_cfg(state, "consumer_loan_spread", 0.05))
+    term = int(_cfg(state, "consumer_loan_term_months", 60))
+    dti_limit = float(_cfg(state, "consumer_loan_dti_limit", 0.40))
+    lending_fraction = float(_cfg(state, "consumer_loan_lending_fraction", 0.7))
+    income_mult = 3.0  # 与 markets/credit.py 默认一致
+
+    # ── A. 等额本息还款 ──
+    for h in state.households:
+        if h.consumer_loan <= 0:
+            continue
+        r = loan_rate / 12.0
+        n = term
+        payment = h.consumer_loan * r / (1.0 - (1.0 + r) ** (-n))
+        # 简化 —分摊: 利息 = 余额 × 月率; 本金 = 余下
+        interest = h.consumer_loan * r
+        principal = payment - interest
+        affordable = min(payment, max(0.0, h.deposits))
+        if affordable < payment:
+            # 断供: 把未付部分资本化 (Phase 1 简化, 不触发违约 — Phase 3 再加)
+            affordable = payment
+            h.deposits -= payment
+        else:
+            h.deposits -= payment
+        h.consumer_loan = max(0.0, h.consumer_loan - principal)
+        bank.deposits_from_hh = max(0.0, bank.deposits_from_hh - payment)
+        bank.loans_to_households = max(
+            0.0, bank.loans_to_households - principal
+        )
+        bank.capital += interest  # 利息收入入资本
+
+    # ── B + C. 申请 + 配给 ──
+    approved_total = 0.0
+    requests = []
+    for h in state.households:
+        if h.income <= 0:
+            continue
+        gap = max(0.0, h.income - h.deposits)
+        desired = min(income_mult * h.income, gap)
+        if desired < 1e-3:
+            continue
+        new_balance = h.consumer_loan + desired
+        if new_balance / h.income > dti_limit:
+            desired = max(0.0, dti_limit * h.income - h.consumer_loan)
+            if desired < 1e-3:
+                h.credit_denied_months += 1
+                continue
+        requests.append((h, desired))
+
+    # 简化配给: 随机拒绝 (1-lending_fraction) 的申请, 用 RNGManager 保证可复现
+    rng = getattr(state, "rng_manager", None)
+    if rng is not None:
+        rand_stream = rng.stream("credit_denials")
+        denied_n = int((1.0 - lending_fraction) * len(requests))
+        deny_idx = (
+            set(rand_stream.choice(len(requests), size=denied_n, replace=False))
+            if denied_n > 0 and len(requests) > 0
+            else set()
+        )
+    else:
+        deny_idx = set()
+    for idx, (h, amt) in enumerate(requests):
+        if idx in deny_idx:
+            h.credit_denied_months += 1
+            continue
+        # 发放
+        h.deposits += amt
+        h.consumer_loan += amt
+        h.consumer_loan_rate = loan_rate
+        bank.deposits_from_hh += amt
+        bank.loans_to_households += amt
+        approved_total += amt
+
+
+# ════════════════════════════════════════════════════════════
 # 4. 家庭消费
 # ════════════════════════════════════════════════════════════
 def _household_consumption(state: SimulationState) -> None:
@@ -240,9 +341,13 @@ def _bank_cycle(state: SimulationState) -> None:
     if int_hh > 0:
         n_emp = max(1, sum(1 for h in state.households if h.deposits > 0))
         per_hh = int_hh / n_emp
-        for h in state.households:
-            if h.deposits > 0:
-                h.deposits += per_hh
+        distributed = 0.0
+        # 按人均分配 + 把舍入残差分配给最后一人 (避免 deposit drift)
+        eligible = [h for h in state.households if h.deposits > 0]
+        for idx, h in enumerate(eligible):
+            pay = per_hh if idx < len(eligible) - 1 else (int_hh - distributed)
+            h.deposits += pay
+            distributed += pay
         bank.deposits_from_hh += int_hh
     if int_firm > 0:
         firm.deposits += int_firm
@@ -325,6 +430,162 @@ def _government_cycle(state: SimulationState) -> None:
         cb.gov_bonds += injection        # CB 承接
         cb.bank_reserves += injection    # 准备金注入/回笼
         bank.reserves += injection       # 与 CB 账目镜像
+        # 准备金的归宿由 P0-b 的 _bond_cycle 接管:
+        # 政府用注入的现金去买私人部门的债 → 私人部门存款↓, 政府 treasury↑.
+        # 因此本阶段**不**直接增 gov.treasury_deposits (避免双记账).
+
+
+# ════════════════════════════════════════════════════════════
+# 7b. 债券市场 (P0-b): 政府赤字经私人部门持债渠道融资 + 月度付息
+# ════════════════════════════════════════════════════════════
+def _bond_cycle(state: SimulationState) -> None:
+    """发行新债覆盖政府赤字 + 付息.
+
+    ⚠️ 与 Phase 2 的"赤字 100% CB 货币化"并存: 现在赤字先经 CB 货币化 (注入
+    准备金), 然后立刻被本函数通过私人部门持债"倒回": 发债把等额准备金从私人
+    部门抽走, 政府 treasury_deposits ↑, 私人部门 bonds ↑, 银行准备金 ↓.
+
+    经济解读: 政府现在向私人部门借钱, 而不是直接印钞. CB 仍承担最后买家角色
+    (OMO), 但默认路径走私人.
+
+    步骤:
+      A. 计算当月应发债额 = J (来自 _government_cycle 的注入)
+         **以及** 当月利息支付额 I = outstanding × coupon / 12
+      B. 发债: 分配给家庭 (默认 70%) + 银行 (30%),
+         资金从私人部门 deposits 转到 gov.treasury_deposits.
+      C. 付息: 从 gov.treasury_deposits 按持有比例分配给持有人,
+         对方存款增加.
+    """
+    if not bool(_cfg(state, "enable_bond_market", True)):
+        return
+    if state.government is None or state.central_bank is None:
+        return
+    if state.bank is None:
+        return
+
+    bond_mkt = state.bond_market
+    if bond_mkt is None:
+        return
+
+    gov = state.government
+    cb = state.central_bank
+    bank = state.bank
+
+    # 票息率跟随政策利率 (避免外生硬编码)
+    if state.central_bank is not None:
+        bond_mkt.coupon_rate = float(state.central_bank.policy_rate)
+
+    # ── A. 月度付息 (优先于发债: 付息后 government 才知道还需发多少新债) ──
+    interest_due = bond_mkt.monthly_interest_due()
+    interest_paid = 0.0
+    if interest_due > 0 and bond_mkt.outstanding > 0:
+        # 资金从 gov.treasury_deposits 流出 (优先) → 否则发新债补
+        source = min(interest_due, gov.treasury_deposits)
+        if source < interest_due:
+            # treasury 不够 → 调高本期发债额 (后置覆盖)
+            pass  # 在 B 步覆盖
+        for hid, amt in bond_mkt.holders.items():
+            pay = amt * bond_mkt.coupon_rate / 12.0
+            if pay <= 0:
+                continue
+            # 从 gov.treasury_deposits 流出; 接收方按 hid 类型分流
+            gov.treasury_deposits = max(0.0, gov.treasury_deposits - pay)
+            cb.treasury_deposits = max(0.0, cb.treasury_deposits - pay)
+            if hid.startswith("hh_") or hid.startswith("h_"):
+                # 家庭收款: deposits ↑
+                h = _find_household(state, hid)
+                if h is not None:
+                    h.deposits += pay
+                    bank.deposits_from_hh += pay
+            else:
+                # 银行收款: 钱从政府 treasury 账户 → 银行准备金.
+                #   cb.bank_reserves ↑pay   (CB 账上银行的存款↑)
+                #   bank.reserves   ↑pay    (银行账上其在 CB 的存款↑)
+                # ⚠️ 不需要单独记 bank.capital: A 增 L 不变 → capital 隐含增.
+                cb.bank_reserves += pay
+                bank.reserves += pay
+            interest_paid += pay
+    state.monthly_interest_paid = interest_paid
+
+    # ── B. 发新债 (覆盖当月赤字 + 未补付息缺口) ──
+    # 估算当月赤字 = 当月 G + TR - T (从 gov.tax_revenue 与 gov.gov_spending 推)
+    primary_deficit = max(
+        0.0,
+        gov.gov_spending + gov.transfers - gov.tax_revenue,
+    )
+    unfunded_interest = max(0.0, interest_due - interest_paid)
+    issuance_need = primary_deficit + unfunded_interest
+
+    # debt brake: 不让债务超过 bond_max_debt_to_gdp × 年化 GDP
+    # 但初始 gov.debt 中包含"镜像初始准备金"的"虚拟债" (SFC 中性的) —
+    # 这部分不算入财政空间. 这里用 gov.debt - cb.bank_reserves 近似"净债",
+    # 更准确的方法是引入独立的 "structural_debt" 字段. 当前简化为:
+    #   net_debt_for_brake = gov.debt - min(gov.debt, cb.bank_reserves)
+    # 即把 gov.debt 与 cb.bank_reserves 重叠的部分 (结构性货币化债) 剔除.
+    annual_gdp = max(1.0, state.real_gdp * 12)
+    max_net_debt = float(_cfg(state, "bond_max_debt_to_gdp", 1.5)) * annual_gdp
+    net_debt = max(0.0, gov.debt - min(gov.debt, cb.bank_reserves))
+    headroom = max(0.0, max_net_debt - net_debt)
+    issuance_need = min(issuance_need, headroom)
+    if issuance_need <= 0:
+        return
+
+    # 分配: 家庭 (按 deposits 比例) + 银行 (剩余 + 舍入残差)
+    hh_share_target = float(
+        _cfg(state, "bond_issuance_household_share", 0.7)
+    )
+    hh_total_dep = sum(h.deposits for h in state.households)
+    allocations: dict[str, float] = {}
+    hh_total = 0.0  # 实际计入家庭的总分配 (含 <1e-6 跳过的部分, 留给银行)
+    if hh_total_dep > 0:
+        target_hh = issuance_need * hh_share_target
+        for h in state.households:
+            w = h.deposits / hh_total_dep
+            amt = w * target_hh
+            if amt < 1e-6:
+                # 不分配给这家 (避免微小噪声), 额计入银行承担的部分
+                continue
+            allocations[h.id] = amt
+            h.bonds += amt
+            h.deposits -= amt
+            hh_total += amt
+        # 镜像: 银行的家庭存款负债减 (家庭存款减少)
+        bank.deposits_from_hh = max(
+            0.0, bank.deposits_from_hh - hh_total
+        )
+    bank_amt = issuance_need - hh_total
+    if bank_amt > 0:
+        # 银行的"份额"直接归 CB (银行用准备金买债容易出现"准备金不足买债"
+        # 引起的 phantom 资产, 这里简化为: 私人买不到的部分由 CB 持有).
+        # 在更精细的实现里, 应引入银行自营账户, 与客户存款严格区分.
+        allocations[cb.id] = allocations.get(cb.id, 0.0) + bank_amt
+        cb.gov_bonds += bank_amt
+
+    # 私人部门买债时, 钱从私人部门的存款"搬家"到政府 treasury 账户.
+    # 镜像记账:
+    cb.treasury_deposits += issuance_need
+    gov.treasury_deposits += issuance_need
+
+    # 政府 / CB 入账 (债务存量增加)
+    gov.debt += issuance_need
+    cb.gov_bonds += issuance_need  # CB 仍是承接方 (隐含"包销+二级转私人")
+
+    # 更新市场簿记
+    bond_mkt.issue(issuance_need, allocations)
+
+    logger.info(
+        f"  Bond issue: {issuance_need:.2f} "
+        f"(prim_deficit={primary_deficit:.2f}, "
+        f"unfunded_int={unfunded_interest:.2f}); "
+        f"gov.debt → {gov.debt:.2f}"
+    )
+
+
+def _find_household(state: SimulationState, hid: str):
+    for h in state.households:
+        if h.id == hid:
+            return h
+    return None
 
 
 # ════════════════════════════════════════════════════════════
@@ -340,6 +601,84 @@ def _firm_capital_cycle(state: SimulationState) -> None:
     investment = firm.decide_investment()
     if investment > 0:
         firm.invest(investment)
+
+
+# ════════════════════════════════════════════════════════════
+# REO 清算: 把银行止赎房产卖给家庭 (所有权转移, SFC 镜像)
+# ════════════════════════════════════════════════════════════
+def _liquidate_reo(
+    state: SimulationState,
+    liquidation_discount: float,
+    fire_sale: bool = False,
+) -> int:
+    """把银行的 REO 房产按清算折扣价卖给有存款的家庭.
+
+    记账 (严格镜像, A = L + capital 守恒, 不动准备金 — 买方从自己在银行的
+    存款付钱, 钱只是从银行的存款科目内部"流走", 银行没有真正收现金):
+      银行: reo_value −V_book               (实物资产出表)
+            deposits_from_hh −V_sale        (买方的存款减少, 银行负债减)
+            capital +(V_sale − V_book)       (差额: 实现损益)
+
+      CB: 不变 (无准备金变动 — 钱在银行体系内部循环)
+
+      家庭: deposits −V_sale / housing_units +1 (买房 + 出钱)
+
+    历史 bug: 原版把这笔记账写成 reserves↑+deposits↑, 等于凭空创造
+    100 现金, 立刻被 SFC 检查捕获.
+    """
+    sold_total = 0
+    for bank in state.banks:
+        if bank.reo_properties <= 0 or bank.reo_value <= 0:
+            continue
+        book_per_unit = bank.reo_value / bank.reo_properties
+        while bank.reo_properties > 0:
+            sale_price = housing_market_sale_price(state, liquidation_discount)
+            if sale_price <= 0:
+                break
+            buyer = pick_reo_buyer(state, sale_price)
+            if buyer is None:
+                # 没有买得起的家庭 → 保留在 REO, 等下月 (价格继续压)
+                break
+            book = book_per_unit  # 简化: 所有 REO 同价入账
+            # ── 家庭 ──
+            buyer.deposits -= sale_price
+            buyer.housing_units += 1
+            # ── 银行 (镜像) ──
+            bank.deposits_from_hh = max(0.0, bank.deposits_from_hh - sale_price)
+            bank.reo_value = max(0.0, bank.reo_value - book)
+            bank.reo_properties -= 1
+            bank.capital += sale_price - book  # 实现损益
+            sold_total += 1
+    return sold_total
+
+
+def housing_market_sale_price(
+    state: SimulationState, liquidation_discount: float,
+) -> float:
+    """REO 销售价 = 当前房价 × 清算折扣 (或 fire-sale 折扣).
+
+    fire_sale=True 时额外乘 (1 − fire_sale_pressure), 即压力越大折扣越深.
+    """
+    if state.housing_market is None:
+        return 0.0
+    base = state.housing_market.price * liquidation_discount
+    if state.fire_sale_pressure > 0:
+        base *= 1.0 - state.fire_sale_pressure * 0.5
+    return max(0.0, base)
+
+
+def pick_reo_buyer(state: SimulationState, sale_price: float) -> object | None:
+    """从无房家庭里挑一个买得起 sale_price 的 (用存款兜底).
+
+    教学简化: 任何 deposits ≥ sale_price 的家庭都能买, 按存款降序取第一.
+    不引入首付/信贷约束 (Phase 3+ 再加).
+    """
+    candidates = sorted(
+        (h for h in state.households if h.deposits >= sale_price),
+        key=lambda h: h.deposits,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
 
 
 # ════════════════════════════════════════════════════════════
@@ -461,9 +800,18 @@ def _update_inflation(state: SimulationState) -> None:
 # 10. SFC 校验
 # ════════════════════════════════════════════════════════════
 def _validate_sfc(state: SimulationState) -> None:
-    """构造 BS 字典并校验 SFC."""
+    """构造 BS 字典并校验 SFC (金融 + 实物住房存量)."""
     bs_dict = state.build_balance_sheets()
     errors = validate_sfc(bs_dict)
+    # 实物住房存量: 持有 = 家庭 + REO (BEFORE: 银行 REO 在 fire-sale 阶段直接清零)
+    if state.housing_market is not None:
+        total_units = state.housing_market.total_units
+        if total_units > 0:
+            units_hh = sum(h.housing_units for h in state.households)
+            units_reo = sum(b.reo_properties for b in state.banks)
+            errors.extend(
+                validate_housing_stock(units_hh, units_reo, total_units)
+            )
     if errors:
         logger.warning(f"SFC violations at tick {state.t}: {errors}")
         state.sfc_violations.append(errors)
@@ -570,6 +918,15 @@ def _mortgage_default_check(state: SimulationState) -> None:
 
     触发: housing_value < mortgage_balance × default_ltv_threshold
           (即 LTV > 110% → 负资产 → 失业 + 高 LTV 双重打击)
+
+    处置: 部分回收 (非凭空销毁) — 历史 bug: 原版直接 `write_off_mortgage`
+    全额 + `h.housing_units = 0`, 房子消失了, 银行承担 100% 损失. 现改为:
+        1. 银行以清算价 (house_value × 清算折扣) 收回房产, 入 `reo_value`
+           借方 A (loans_to_hh 减 M; reo_value 加 R)        借方 L 不变
+           资本: −(M − R) = −损失
+        2. 房屋所有权转给银行 (从家庭搬到 REO 簿), 通过 housing_units 同步减
+           家庭侧 + 增 bank.reo_properties (数量守恒)
+        3. 房贷余额双边归零: bank.loans_to_hh 减 M / h.mortgage 减 M (SFC 同步)
     """
     housing = state.housing_market
     if housing is None:
@@ -579,40 +936,50 @@ def _mortgage_default_check(state: SimulationState) -> None:
     if bank is None:
         return
 
-    npl_marked = 0.0
     missed_threshold = int(_cfg(state, "mortgage_missed_payment_limit", 3))
+    liquidation_discount = float(
+        _cfg(state, "mortgage_liquidation_discount", 0.70)
+    )
+    npl_marked = 0.0
     for h in state.households:
         if h.mortgage_balance <= 0 or h.housing_units <= 0:
             continue
         house_value = h.housing_units * housing.price
         ltv = h.mortgage_balance / house_value if house_value > 0 else float("inf")
-        # 双触发: (a) 负资产 + 连续断供 ≥ N 月; (b) 负资产 + 长期失业 > 6 月
         underwater = ltv > housing.default_ltv_threshold
         payment_stress = h.mortgage_missed_payments >= missed_threshold
         long_unemployed = (not h.employed) and h.unemployment_duration > 6
-        if underwater and (payment_stress or long_unemployed):
-            # 标记 NPL: 房贷余额全额转入 npl_mortgages
-            npl_amount = h.mortgage_balance
-            bank.npl_mortgages += npl_amount
-            bank.mark_npl(npl_amount)
-            npl_marked += npl_amount
+        if not (underwater and (payment_stress or long_unemployed)):
+            continue
 
-            # 银行收回房产 → 计入 reo_properties (估值按当前房价 × 0.7 清算折扣)
-            bank.reo_properties += h.housing_units
-            # 立即核销: 贷款消失, capital 减
-            written = bank.write_off_mortgage(npl_amount)
-            # 银行的"实物资产"= REO, 但 BS 模型不直接追踪; 通过 capital 减少反映损失
-            # 同时 HH.mortgage_balance 归零 (但 h.housing_units 也归零)
-            h.mortgage_balance = 0
-            h.housing_units = 0
-            logger.info(
-                f"  Mortgage default: HH {h.id}, LTV={ltv:.2f}, "
-                f"written off {written:.2f}"
-            )
+        mortgage = h.mortgage_balance
+        recovery_value = house_value * liquidation_discount  # R ≤ M (默认折扣≤1)
+        loss = mortgage - recovery_value                     # 银行承担的损失
 
-    # 银行累计 REO 在 fire-sale 阶段会被折价清算
+        # ── 银行账本: 资产端重组, 资本减损失 ──
+        bank.loans_to_households = max(
+            0.0, bank.loans_to_households - mortgage
+        )
+        bank.reo_value += recovery_value
+        bank.capital -= loss
+        bank.npl_mortgages += mortgage
+        bank.mark_npl(mortgage)
+        bank.npl_writes_off_cumulative += loss  # 教学诊断: 累计实现损失
+        npl_marked += mortgage
+
+        # ── 家庭账本: 房贷归零, 房子所有权转银行 (数量守恒) ──
+        units = h.housing_units
+        h.mortgage_balance = 0.0
+        h.housing_units = 0
+        bank.reo_properties += units
+
+        logger.info(
+            f"  Mortgage default: HH {h.id}, LTV={ltv:.2f}, "
+            f"mortgage={mortgage:.2f}, recovery={recovery_value:.2f}, "
+            f"loss={loss:.2f}"
+        )
+
     if npl_marked > 0:
-        # fire-sale 压力与待售 REO 数量成正比 (简化)
         state.fire_sale_pressure = min(
             1.0, state.fire_sale_pressure + bank.reo_properties * 0.001
         )
@@ -662,8 +1029,8 @@ def _fire_sale_and_failure(state: SimulationState) -> None:
     下, 银行 capital 可为负 (Phase 3 处置回收).
     """
     # ── 0. REO 甩卖外部性 (单/多银行模式均生效) ──
-    # 银行持有的止赎房产推向市场, 按比例压低房价 (Brunnermeier-Pedersen 简化).
-    # 房产不在任何货币账目上, 清算只影响价格参数与 REO 计数, SFC 中性.
+    # 房产从银行卖给家庭, 不是凭空销毁. 历史 bug: 原版 `reo_properties = 0`
+    # 让房子消失 → 触发 housing_stock 校验失败.
     housing_mkt = getattr(state, "housing_market", None)
     reo_total = sum(b.reo_properties for b in state.banks)
     if housing_mkt is not None and reo_total > 0:
@@ -671,20 +1038,58 @@ def _fire_sale_and_failure(state: SimulationState) -> None:
         impact = impact_cfg * min(1.0, reo_total / max(1, housing_mkt.total_units))
         impact = min(impact, 0.20)  # 单月最多压价 20%
         housing_mkt.price *= 1.0 - impact
-        for b in state.banks:
-            b.reo_properties = 0  # 已清算完毕
+        if bool(_cfg(state, "enable_reo_liquidation", True)):
+            liquidation_discount = float(
+                _cfg(state, "mortgage_liquidation_discount", 0.70)
+            )
+            sold = _liquidate_reo(state, liquidation_discount, fire_sale=False)
+            logger.info(
+                f"  REO liquidation: {sold}/{reo_total} units sold at "
+                f"{1 - liquidation_discount:.0%} discount"
+            )
+        else:
+            logger.info(f"  REO retained: {reo_total} units (liquidation off)")
         state.fire_sale_pressure = min(
             1.0, state.fire_sale_pressure + 0.1
-        )
-        logger.info(
-            f"  Fire-sale: {reo_total} REO units liquidated, "
-            f"price -{impact:.1%}"
         )
     else:
         state.fire_sale_pressure = max(0.0, state.fire_sale_pressure - 0.02)
 
     if len(state.banks) <= 1:
-        return  # 单银行模式不模拟银行失败 (与 Phase 0 一致)
+        # 单银行模式 (n_banks=1): 仍允许银行失败/救助逻辑, 但跳过同业拆借
+        # 处理 (无对手方). 救助注资本身可在单银行下生效, 用于演示 TARP 式处置.
+        threshold = float(_cfg(state, "bank_failure_car_threshold", 0.04))
+        bank = state.banks[0]
+        if not bank.is_failed and bank.is_under_capitalized(threshold):
+            bank.is_failed = True
+            bank.months_since_failure = 0
+            state.failed_banks.append(bank.id)
+            logger.warning(
+                f"Bank FAILED at t={state.t}: {bank.id}, "
+                f"CAR={bank.car():.3f}, capital={bank.capital:.2f}"
+            )
+        # ── 救助注资 (单银行模式) ──
+        if bank.is_failed and state.central_bank is not None:
+            cb2 = state.central_bank
+            bail_margin = float(_cfg(state, "bailout_car_margin", 0.02))
+            gov_obj = state.government
+            assert gov_obj is not None
+            target_cap = (
+                bank.car_requirement + bank.car_buffer + bail_margin
+            ) * bank.total_assets()
+            need = max(0.0, target_cap - bank.capital)
+            if need > 1e-9:
+                gov_obj.debt += need
+                gov_obj.other_assets += need
+                cb2.gov_bonds += need
+                cb2.bank_reserves += need
+                bank.reserves += need
+                bank.capital += need
+                logger.info(
+                    f"  Bailout (single-bank): gov injected {need:.2f} "
+                    f"into {bank.id}, CAR → {bank.car():.3f}"
+                )
+        return
 
     threshold = float(_cfg(state, "bank_failure_car_threshold", 0.04))
     failed_this_tick: list[str] = []

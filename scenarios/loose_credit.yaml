@@ -1,0 +1,18 @@
+# 宽信用场景: 利率宽松 + 财政刺激. 校准套件 TestBankProCyclicality 用.
+
+name: loose_credit
+description: |
+  利率宽松 + 财政刺激组合. 用于验证宽松通道与银行资本顺周期.
+
+seed: 11
+n_ticks: 60
+n_households: 200
+
+gov_spending_share_gdp: 0.55   # 宽松财政 (略高于稳态校准 0.45)
+income_tax_rate: 0.20          # 减税
+
+enable_housing: true
+enable_events: true
+preset_shocks:
+  - easing_50bp_6m
+  - fiscal_stimulus_20p_12m

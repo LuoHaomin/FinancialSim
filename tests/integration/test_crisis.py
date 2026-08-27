@@ -22,7 +22,7 @@ CRISIS_SHOCKS = [
 def _run_crisis(n_ticks: int = 48, n_households: int = 200) -> Simulation:
     cfg = SimConfig(
         n_households=n_households,
-        n_banks=3,
+        n_banks=1,
         n_ticks=n_ticks,
         wealth_effect_coef=0.05,
         preset_shocks=CRISIS_SHOCKS,

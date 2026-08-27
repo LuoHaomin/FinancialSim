@@ -12,6 +12,7 @@ from financial_sim.config import SimConfig
 from financial_sim.core.state import SimulationState
 from financial_sim.core.step import monthly_tick
 from financial_sim.expectations.inflation import InflationExpectation
+from financial_sim.markets.bonds import BondMarket
 from financial_sim.markets.housing import HousingMarket
 from financial_sim.network.interbank import InterbankNetwork
 from financial_sim.simulation.events import EventManager, build_event_manager
@@ -32,11 +33,19 @@ class Simulation:
         state = sim.state  # 查看宏观变量
     """
 
-    def __init__(self, config: SimConfig | None = None, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        config: SimConfig | None = None,
+        seed: int | None = None,
+        scenario_events: EventManager | None = None,
+    ) -> None:
         self.config = config or SimConfig.default()
         self.seed = seed if seed is not None else self.config.seed
         self.rng = RNGManager(seed=self.seed)
         self.state = self._build_state(self.config)
+        # P0-c: scenario_events 覆盖自动从 config.preset_shocks 装配的 manager
+        if scenario_events is not None:
+            self.state.event_manager = scenario_events
         logger.info(
             f"Simulation initialized (seed={self.seed}): "
             f"{len(self.state.households)} HHs, "
@@ -48,11 +57,24 @@ class Simulation:
     # 初始化 (SFC-balanced)
     # ════════════════════════════════════════════════════════════
     def _build_state(self, config: SimConfig) -> SimulationState:
-        """构造初始 SFC-balanced state, 家庭参数走命名随机流."""
+        """构造初始 SFC-balanced state, 家庭参数走命名随机流.
+
+        初始化策略 (VALIDATION.md §13.2 "反向推算"):
+        先定各部门的**行为性**存量 (家庭存款/房贷、企业贷款/存款), 再把银行
+        准备金与资本作为**平衡项**反解出来, 使初始 CAR 命中目标值:
+
+            A_bank = 存款总额 / (1 − car_target)
+            准备金 = A_bank − 贷款总额
+            资本   = A_bank − 存款总额 = car_target × A_bank
+
+        央行/政府侧再镜像准备金 (CB 持等额国债). 这样初始 CAR 是**校准出来的**,
+        而不是记账凑数的副产品 — 历史 bug: 初始房贷曾用 `bank.capital +=
+        total_mortgages` 凑平, 导致 CAR ≈ 1.2, 资本监管通道从第一个 tick 就失效.
+        """
         n_hh = config.n_households
         h_rng = self.rng.stream("household_init")
 
-        # ── 央行 ──
+        # ── 央行 (先只设政策参数, 资产负债表在最后镜像) ──
         cb = CentralBank(
             policy_rate=config.cb_policy_rate_initial,
             neutral_rate=config.cb_neutral_rate,
@@ -60,68 +82,10 @@ class Simulation:
             taylor_inflation_coeff=config.taylor_inflation_coeff,
             taylor_output_coeff=config.taylor_output_coeff,
         )
-        initial_reserves = float(n_hh) * 10  # 每个家庭 10 单位
-        cb.gov_bonds = initial_reserves
-        cb.bank_reserves = initial_reserves
 
-        # ── 银行 (Phase 2: 多家 + 同业网络) ──
-        n_banks = max(1, int(getattr(config, "n_banks", 1)))
-        banks: list[CommercialBank] = []
-        # 平分初始准备金给各银行 (保持 SFC)
-        per_bank_reserves = initial_reserves / n_banks
-        per_bank_capital = initial_reserves / n_banks
-        for b_idx in range(n_banks):
-            bank = CommercialBank(
-                id=f"bank_{b_idx + 1}",
-                tier=1 if b_idx < int(getattr(config, "interbank_core_size", 3)) else 2,
-                reserves=per_bank_reserves,
-                capital=per_bank_capital,
-                car_requirement=config.car_requirement,
-                car_buffer=config.car_buffer,
-                loan_rate_base_spread=config.loan_rate_base_spread,
-                loan_rate_car_pressure=config.loan_rate_car_pressure,
-                deposit_rate_margin=config.deposit_rate_margin,
-                mortgage_rate_spread=getattr(config, "housing_mortgage_rate_spread", 0.02),
-            )
-            banks.append(bank)
-
-        # 同业网络 (Phase 2)
-        interbank: InterbankNetwork | None = None
-        if n_banks > 1:
-            nw_rng = self.rng.stream("interbank_init")
-            interbank = InterbankNetwork.build_core_periphery(
-                bank_ids=[b.id for b in banks],
-                core_size=int(getattr(config, "interbank_core_size", 3)),
-                link_density=float(getattr(config, "interbank_link_density", 0.5)),
-                avg_exposure=initial_reserves * 0.05 / max(1, n_banks),
-                rng=nw_rng,
-            )
-            # 把敞口记到各银行账目
-            for (creditor_id, debtor_id), amount in interbank.exposures.items():
-                creditor = next(b for b in banks if b.id == creditor_id)
-                debtor = next(b for b in banks if b.id == debtor_id)
-                creditor.interbank_claims += amount
-                debtor.interbank_debt += amount
-
-        # 主银行引用: 恒为 banks[0] (主银行语义).
-        # 多银行时所有"面向部门聚合"的资金流 (工资/消费/政府/税收) 都记在
-        # banks[0]; 其余银行只参与同业网络与逐银行政策. 聚合视图由
-        # build_balance_sheets 现场求和, 不再维护虚拟代理对象.
-        bank = banks[0]
-
-        # ── 政府 ──
-        government = Government(
-            debt=initial_reserves,
-            gov_spending=config.gov_spending_monthly if config.fiscal_enabled else 0.0,
-            transfers=0.0,
-            interest_rate=config.cb_policy_rate_initial,
-        )
-
-        # ── 企业 ──
+        # ── 企业 (贷款融资的营运资金) ──
         wage = 1.0
         initial_firm_deposits = float(n_hh) * wage * 2  # 首月工资 + 缓冲
-        bank.loans_to_firms = initial_firm_deposits
-        bank.deposits_from_firms = initial_firm_deposits
         firm = Firm(
             id="firm_0",
             sector="consumer_goods",
@@ -169,15 +133,107 @@ class Simulation:
         for h in households:
             h.permanent_income = h.wage
 
-        # 异质存款必须与银行账目镜像 (SFC check: HH 存款 = bank.deposits_from_hh)
-        hh_total_deposits = sum(h.deposits for h in households)
-        bank.deposits_from_hh += hh_total_deposits
-        bank.reserves += hh_total_deposits
-        cb.bank_reserves += hh_total_deposits
-        cb.gov_bonds += hh_total_deposits  # CB 再购等额国债为注入提供资产
-        government.debt += hh_total_deposits
+        # ── Phase 2: 住房市场 + 初始房贷 (纯信用创造) ──
+        housing = HousingMarket.from_config(config) if bool(
+            getattr(config, "enable_housing", True)
+        ) else None
+        total_mortgages = 0.0
+        if housing is not None:
+            # 实物存量: 一户一套自住房 (房屋是既存资产, 不通过银行融资)
+            housing.total_units = n_hh
+            for h in households:
+                h.housing_units = 1
+                h.mortgage_balance = 0.0
+                h.mortgage_rate = (
+                    config.cb_policy_rate_initial + housing.mortgage_rate_spread
+                )
 
-        # ── 构造 state ──
+            # 给存款较多的一半家庭发放初始房贷, 启动 mortgage channel.
+            # 记账 (内生信用创造, 两笔同时出现在银行账上, 不需要准备金/资本):
+            #   HH: mortgage +M, deposits +M   ↔  Bank: loans_to_hh +M, deposits +M
+            # 经济含义: 房贷买房的钱付给了上一任房主 (同属家庭部门), 因此家庭部门
+            # 的存款净增 M, 资本/准备金/政府债务均不参与.
+            initial_mortgage_ltv = float(getattr(config, "housing_initial_ltv", 0.70))
+            sorted_hh = sorted(households, key=lambda h: h.deposits, reverse=True)
+            for h in sorted_hh[: n_hh // 2]:
+                mortgage = housing.price * initial_mortgage_ltv
+                h.mortgage_balance = mortgage
+                h.deposits += mortgage
+                total_mortgages += mortgage
+
+        # ── 银行: 准备金与资本作为平衡项反解 (命中目标 CAR) ──
+        hh_total_deposits = sum(h.deposits for h in households)
+        total_deposits = hh_total_deposits + initial_firm_deposits
+        total_loans = initial_firm_deposits + total_mortgages
+        car_target = float(getattr(config, "initial_bank_car", 0.12))
+        car_target = min(max(car_target, 0.0), 0.9)
+        total_bank_assets = total_deposits / (1.0 - car_target)
+        total_reserves = total_bank_assets - total_loans
+        if total_reserves < 0:
+            # 贷款已超过目标资产规模 → 退化为"零准备金, 资本吸收残差"
+            total_reserves = 0.0
+            total_bank_assets = total_loans
+
+        n_banks = max(1, int(getattr(config, "n_banks", 1)))
+        banks: list[CommercialBank] = []
+
+        # 部门聚合 (工资/消费/政府/税收) 资金流只能记在一家银行上, 因为
+        # core/step.py 的 _bank_cycle() 等函数只用 state.bank (= banks[0]).
+        # 这是一个**主银行语义**简化: 多银行时其余银行只参与同业网络与逐银行
+        # 政策, 不直接吸收部门资金流.
+        # 准备金分配: 主银行持有全部 (因为部门聚合准备金也只在主银行账上);
+        # 外围银行 reserves = 0, 仅靠 interbank_claims 持有同业债权.
+        for b_idx in range(n_banks):
+            bank = CommercialBank(
+                id=f"bank_{b_idx + 1}",
+                tier=1 if b_idx < int(getattr(config, "interbank_core_size", 3)) else 2,
+                reserves=total_reserves if b_idx == 0 else 0.0,
+                car_requirement=config.car_requirement,
+                car_buffer=config.car_buffer,
+                loan_rate_base_spread=config.loan_rate_base_spread,
+                loan_rate_car_pressure=config.loan_rate_car_pressure,
+                deposit_rate_margin=config.deposit_rate_margin,
+                mortgage_rate_spread=getattr(config, "housing_mortgage_rate_spread", 0.02),
+            )
+            banks.append(bank)
+
+        # 主银行持有部门聚合的存贷款
+        bank = banks[0]
+        bank.loans_to_firms = initial_firm_deposits
+        bank.loans_to_households = total_mortgages
+        bank.deposits_from_firms = initial_firm_deposits
+        bank.deposits_from_hh = hh_total_deposits
+        # 资本 = A − L (主银行单独平衡, 余下银行只放同业敞口)
+        bank.capital = bank.total_assets() - bank.total_liabilities()
+
+        # ── 同业网络 (Phase 2): claims/debt 双边同额, 聚合恒等式不变 ──
+        # ⚠️ claims/debt 是**银行间**内部资产/负债, 不会改变聚合 BS 恒等式,
+        # 因此**不**应调整任何银行的 capital 字段. 这里的主银行资本已在前面
+        # 锁定, 外围银行初始 capital=0; 同业敞口的产生是"市场把准备金重新
+        # 分配到银行间", 而不是凭空创造/销毁资本.
+        # (历史 bug: 早期版本把 `creditor.capital += amount` 写在了这里,
+        # 导致聚合 BS 不平衡 −2409 单位, 第一 tick 就被 SFC 检查捕获.)
+        # ⚠️ 已知简化 (Phase 3 Week E 修复): 当前 multi-bank 初始化**不**真正
+        # 注入同业敞口 — 因为:
+        #   1. 主银行之外的银行初始 reserves=0 (它们的钱都存主银行);
+        #   2. 真正"开同业关系"意味着主银行减 reserves, 外围银行增 reserves;
+        #   3. 但外围银行的 reserves 走的是"从主银行拆借", 这会引入循环依赖.
+        # 暂用 interbank=None + interbank_network=None, crisis 场景跑单银行
+        # (n_banks=1) 即可演示银行失败 + 政府救助; 多银行的同业敞口留 Phase 3.
+        interbank: InterbankNetwork | None = None
+        # 多银行模式在 Phase 3 Week E 修复前**禁用** — 见上方说明.
+        # 多银行场景的 SFC 校验依赖 Phase 3 真实的多银行账目拆分.
+
+        # ── 央行 + 政府: 镜像准备金 (CB 持等额国债) ──
+        cb.bank_reserves = total_reserves
+        cb.gov_bonds = total_reserves
+        government = Government(
+            debt=total_reserves,
+            gov_spending=config.gov_spending_monthly if config.fiscal_enabled else 0.0,
+            transfers=0.0,
+            interest_rate=config.cb_policy_rate_initial,
+        )
+
         # ── Phase 1+: 事件系统 (从 config.preset_shocks 自动装配) ──
         em: EventManager | None = None
         if bool(getattr(config, "enable_events", True)) and getattr(
@@ -185,58 +241,15 @@ class Simulation:
         ):
             em = build_event_manager(config.preset_shocks)
 
-        # ── Phase 2: 住房市场 ──
-        housing = HousingMarket.from_config(config) if bool(
-            getattr(config, "enable_housing", True)
-        ) else None
-        if housing is not None:
-            # 初始化家庭住房持有: 一户一套自住房 (全款, 无房贷)
-            # 简化: 房屋视为"已存在的资产", 不通过银行账目融资
-            # 房贷机制仅在 _mortgage_default_check 中以"动态发放"形式出现
-            for h in households:
-                h.housing_units = 1
-                h.mortgage_balance = 0.0  # 初始无房贷
-                h.mortgage_rate = (
-                    config.cb_policy_rate_initial
-                    + housing.mortgage_rate_spread
-                )
-
-            # 给一部分家庭 (按存款分布) 发放初始抵押贷款, 以启动 mortgage channel
-            # 资金来源: 银行用 CB 注入的准备金发放 (SFC-balanced)
-            initial_mortgage_ltv = float(
-                getattr(config, "housing_initial_ltv", 0.70)
+        # ── Phase 3 前置 P0-b: 债券市场 ──
+        bond_market: BondMarket | None = None
+        if bool(getattr(config, "enable_bond_market", True)):
+            bond_market = BondMarket(
+                outstanding=0.0,
+                coupon_rate=float(
+                    getattr(config, "bond_coupon_rate", 0.025)
+                ),
             )
-            total_mortgages = 0.0
-            # 选择存款较多的一半家庭 (按存款降序)
-            sorted_hh = sorted(
-                households, key=lambda h: h.deposits, reverse=True
-            )
-            eligible = sorted_hh[: n_hh // 2]
-            for h in eligible:
-                mortgage = housing.price * initial_mortgage_ltv
-                h.mortgage_balance = mortgage
-                # HH 拿到现金 (买房首付已被假设支付, 现金进入存款)
-                # 这里简化为: mortgage 直接进 HH 存款 (隐含"再融资"提取)
-                h.deposits += mortgage
-                total_mortgages += mortgage
-
-            # 银行端镜像 (SFC 严格分账)
-            # 机制: CB 通过 OMO 向银行注入准备金 → 银行获得资金发放贷款
-            #   bank.A += reserves (从 CB); bank.A += loans_to_hh; bank.L += deposits
-            #   → bank.A - bank.L - bank.capital 必须守恒
-            # 解法: 注入时 bank.capital 同步增加 (CB 的资本注入, 类似 QE)
-            if banks and total_mortgages > 0:
-                bank0 = banks[0]
-                bank0.loans_to_households = total_mortgages
-                # CB OMO: 准备金注入 + 等额资本注入 (SFC 平衡)
-                cb.gov_bonds += total_mortgages
-                cb.bank_reserves += total_mortgages
-                bank0.reserves += total_mortgages
-                bank0.capital += total_mortgages  # 关键: 资本同步增
-                # HH 存款增加 → bank.deposits_from_hh 同步增加
-                bank0.deposits_from_hh += total_mortgages
-                # 政府债务 (OMO 购债 = 政府"卖给"CB)
-                government.debt += total_mortgages
 
         return SimulationState(
             t=0,
@@ -261,6 +274,7 @@ class Simulation:
             housing_market=housing,
             housing_price=housing.price if housing else 200.0,
             interbank_network=interbank,
+            bond_market=bond_market,
         )
 
     # ════════════════════════════════════════════════════════════

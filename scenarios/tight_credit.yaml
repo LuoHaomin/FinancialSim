@@ -1,0 +1,19 @@
+# 紧信用场景: 货币紧缩冲击, 用于利率传导与违约通道测试.
+
+name: tight_credit
+description: |
+  货币紧缩 + 财政紧缩双冲击. 用于验证利率传导链与违约通道,
+  Phase 2 calibration suite 的 TestCrisisEmergence 用.
+
+seed: 11
+n_ticks: 48
+n_households: 200
+
+gov_spending_share_gdp: 0.30   # 紧缩财政
+income_tax_rate: 0.25
+
+enable_housing: true
+enable_events: true
+preset_shocks:
+  - tightening_50bp_6m
+  - fiscal_austerity_30p_12m

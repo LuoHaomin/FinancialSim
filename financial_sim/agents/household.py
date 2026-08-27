@@ -61,6 +61,12 @@ class Household:
     rental_income: float = 0.0             # 当月租金收入
     mortgage_missed_payments: int = 0      # 连续错过月供次数 (断供压力计)
 
+    # ── Phase 3 前置: 消费信贷 (P0-a) + 私人持债 (P0-b) ──
+    consumer_loan: float = 0.0             # 消费贷余额
+    consumer_loan_rate: float = 0.0        # 消费贷利率 (发放时锁定)
+    credit_denied_months: int = 0           # 连续被信贷配给拒绝的月数 (教学诊断)
+    bonds: float = 0.0                     # 持有国债面值
+
     def decide_consumption(self) -> float:
         """消费决策: c = mpc·Y^perm + λ·max(0, NW − buffer·Y^perm).
 
@@ -85,13 +91,16 @@ class Household:
         self.permanent_income += a * (self.income - self.permanent_income)
 
     def net_worth(self) -> float:
-        """净资产 = 现金 + 存款 (Phase 1) + 房屋净值 (Phase 2).
+        """金融净资产 = 现金 + 存款 + 债券 − 房贷 − 消费贷.
 
-        Phase 2 简化为不考虑房价: house equity = housing_units × price − mortgage
-        调用方需先更新 housing_price 才能反映真实净值. 此处不取价格依赖,
-        避免循环导入; step 层在房价更新后调用 net_worth().
+        有意**不含住房**: 一方面避免对房价的循环依赖, 另一方面住房是非流动
+        资产, 对消费的边际影响远小于流动财富 (房产财富效应由
+        `housing_equity()` 单独提供给需要它的调用方).
         """
-        return self.cash + self.deposits - self.mortgage_balance
+        return (
+            self.cash + self.deposits + self.bonds
+            - self.mortgage_balance - self.consumer_loan
+        )
 
     def housing_equity(self, housing_price: float) -> float:
         """房屋净值 = 房价 × 数量 − 房贷余额."""

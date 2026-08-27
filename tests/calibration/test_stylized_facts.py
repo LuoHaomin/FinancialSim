@@ -93,11 +93,6 @@ class TestParetoWealthTail:
             f"Mean {wealth.mean():.2f} not > median {np.median(wealth):.2f}"
         )
 
-    @pytest.mark.xfail(
-        reason="Phase 1 simplified economy: log-wealth distribution not yet "
-               "strongly LogNormal (no compounding assets). Phase 2: assets.",
-        strict=False,
-    )
     def test_log_wealth_approximately_lognormal(self, baseline_run):
         """log(wealth) 应近似正态 (LogNormal 检验)."""
         from scipy import stats

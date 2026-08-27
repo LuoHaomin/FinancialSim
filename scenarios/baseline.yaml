@@ -1,0 +1,32 @@
+# Baseline 场景: 标准无冲击长跑.
+#
+# 用于:
+# - 回归门禁 (确保任何重构后基线行为不漂移)
+# - 性能预算 (n_ticks=1200 → 50 年月步)
+# - 校准目标矩对照 (校准套件 golden trace)
+
+name: baseline
+description: |
+  标准稳态长跑, 无外生冲击, 用于回归测试与性能基线.
+  n_households=1000 (足够统计意义, 跑得快); n_ticks=1200 (50 年).
+
+seed: 42
+n_ticks: 1200
+n_households: 1000
+
+# 关键参数 (沿用 SimConfig 默认)
+taylor_inflation_coeff: 1.5
+taylor_output_coeff: 0.5
+taylor_smoothing: 0.85
+
+gov_spending_share_gdp: 0.45
+income_tax_rate: 0.25
+corp_tax_rate: 0.21
+
+car_requirement: 0.08
+car_buffer: 0.02
+initial_bank_car: 0.12
+
+enable_housing: true
+enable_events: false
+preset_shocks: []

@@ -20,6 +20,7 @@ from financial_sim.monetary.balance_sheets import (
 from financial_sim.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from financial_sim.markets.bonds import BondMarket
     from financial_sim.markets.housing import HousingMarket
     from financial_sim.network.interbank import InterbankNetwork
 
@@ -96,6 +97,10 @@ class SimulationState:
     housing_market: HousingMarket | None = None
     interbank_network: InterbankNetwork | None = None
     housing_price: float = 200.0          # 房价镜像 (供便捷访问)
+
+    # ── Phase 3 前置 P0-b: 债券市场 ──
+    bond_market: BondMarket | None = None
+    monthly_interest_paid: float = 0.0     # 当月付息累计 (教学诊断)
     housing_price_history: list[float] = field(default_factory=list)
     housing_expectations_factor: float = 1.0  # 房价泡沫因子 (>1 = 投机性溢价)
     fire_sale_pressure: float = 0.0      # 当前 fire-sale 强度 (0-1)
@@ -173,6 +178,7 @@ class SimulationState:
             loans_to_households = sum(b.loans_to_households for b in self.banks)
             gov_bonds_held = sum(b.gov_bonds_held for b in self.banks)
             interbank_claims = sum(b.interbank_claims for b in self.banks)
+            reo_value = sum(b.reo_value for b in self.banks)
             deposits_from_hh = sum(b.deposits_from_hh for b in self.banks)
             deposits_from_firms = sum(b.deposits_from_firms for b in self.banks)
             interbank_debt = sum(b.interbank_debt for b in self.banks)
@@ -185,17 +191,28 @@ class SimulationState:
             loans_to_households = self.bank.loans_to_households
             gov_bonds_held = self.bank.gov_bonds_held
             interbank_claims = 0.0
+            reo_value = self.bank.reo_value
             deposits_from_hh = self.bank.deposits_from_hh
             deposits_from_firms = self.bank.deposits_from_firms
             interbank_debt = 0.0
             lolr_debt = 0.0
             capital = self.bank.capital
 
+        housing_price = self.housing_market.price if self.housing_market else 0.0
+
         return {
             "households": HouseholdBalanceSheet(
                 cash=self.total_household_cash(),
                 deposits=self.total_household_deposits(),
-                # Phase 0: 简化, 只追踪现金 + 存款
+                bonds=sum(h.bonds for h in self.households),
+                housing_self=housing_price * sum(
+                    min(1, h.housing_units) for h in self.households
+                ),
+                housing_investment=housing_price * sum(
+                    max(0, h.housing_units - 1) for h in self.households
+                ),
+                mortgage=sum(h.mortgage_balance for h in self.households),
+                consumer_loan=sum(h.consumer_loan for h in self.households),
             ),
             "firms": FirmBalanceSheet(
                 cash=self.firm.cash,
@@ -210,13 +227,14 @@ class SimulationState:
                 loans_to_households=loans_to_households,
                 gov_bonds_held=gov_bonds_held,
                 interbank_claims=interbank_claims,
+                reo_value=reo_value,
                 deposits_from_hh=deposits_from_hh,
                 deposits_from_firms=deposits_from_firms,
                 interbank_debt=interbank_debt,
                 capital=capital,
             ),
             "government": GovernmentBalanceSheet(
-                treasury_deposits=0,
+                treasury_deposits=self.government.treasury_deposits,
                 other_assets=self.government.other_assets,
                 bonds_outstanding=self.government.debt,
             ),
@@ -226,6 +244,7 @@ class SimulationState:
                 other_assets=0,
                 bank_reserves=self.central_bank.bank_reserves,
                 currency_issued=self.central_bank.currency_issued,
+                treasury_deposits=self.central_bank.treasury_deposits,
                 capital=self.central_bank.capital,
             ),
         }

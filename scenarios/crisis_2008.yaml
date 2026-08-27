@@ -1,0 +1,36 @@
+# 2008 风格金融危机场景.
+#
+# 用于:
+# - 危机涌现测试 (房价崩盘 + 抵押违约 + 银行失败 + 政府救助)
+# - 校准套件的 TestCrisisEmergence 类
+
+name: crisis_2008
+description: |
+  2008 型危机: 房价风险溢价飙升 ×2 + 财政紧缩 + 货币紧缩组合冲击.
+  设计目标: 房价下跌 ≥50%, 至少一家银行失败, 政府出手救助.
+
+seed: 7
+n_ticks: 60
+n_households: 200
+
+taylor_inflation_coeff: 1.5
+taylor_output_coeff: 0.5
+
+# 危机期适度宽松财政, 让救助通道有空间
+gov_spending_share_gdp: 0.50
+income_tax_rate: 0.25
+
+# 银行侧对资本更敏感 (危机期间加价更大)
+car_requirement: 0.08
+car_buffer: 0.04   # 加宽 buffer → loan_rate_car_pressure 更早触发
+
+enable_housing: true
+enable_events: true
+preset_shocks:
+  - housing_risk_premium_spike
+  - housing_risk_premium_spike
+  - fiscal_austerity_30p_12m
+  - tightening_50bp_6m
+
+# 启用财富效应, 让家庭在资产价格下跌时缩减消费 (财富效应通道)
+wealth_effect_coef: 0.05

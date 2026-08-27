@@ -36,11 +36,13 @@ class CentralBank:
     neutral_rate: float = 0.02
     taylor_inflation_coeff: float = 1.5
     taylor_output_coeff: float = 0.5
+    id: str = "cb_1"  # bond_market 簿记需要 holder id
 
     # ── 资产负债表 ──
     gov_bonds: float = 0.0
     bank_reserves: float = 0.0
     currency_issued: float = 0.0
+    treasury_deposits: float = 0.0   # 财政部存款 (负债; 政府侧为资产)
     capital: float = 0.0
 
     # ── 决策方法 ──

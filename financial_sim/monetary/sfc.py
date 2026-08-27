@@ -2,15 +2,22 @@
 
 SFC 核心: 每笔钱在两个部门必须有同样的记账. 违反 SFC 意味着钱凭空产生/消失.
 
-Phase 0 检查项:
+检查项:
 1. 每个部门 BS 恒等式: A = L + NW (银行/CB: A = L + capital)
 2. 跨部门存款一致性 (HH/Firms 存款 = 银行的存款负债)
 3. 跨部门准备金一致性 (银行准备金 = CB 持有的银行准备金)
 4. 跨部门现金一致性 (HH+Firms 现金 = CB 发行的现金)
-5. 政府债券发行与持有的一致性
+5. 政府债券发行与持有的一致性 (HH + 银行 + CB 持有 = 发行)
+6. 家庭贷款一致性 (房贷 + 消费贷 = 银行对家庭的贷款资产)
+7. 企业贷款一致性 (企业银行借款 = 银行对企业的贷款资产)
+8. 财政部存款一致性 (政府 treasury 存款 = CB 的 treasury 负债)
 
 设计文档 §5.3.3 中的"money_supply == money_uses"公式仅在 bank.capital = 0 且
 无现金时成立. 这里用更直接的跨部门一致性检查 (本质上等价但更稳健).
+
+⚠️ 6/7/8 项是 Phase 3 前置批次新增: 在此之前家庭负债、企业贷款、财政部存款
+都在校验范围之外 — 一侧漂移不会被发现. 新增任何"银行对某部门的债权"字段时,
+必须在此同步加一项跨部门检查, 否则该资产等于无人对账.
 """
 from __future__ import annotations
 
@@ -114,14 +121,66 @@ def validate_sfc(balance_sheets: dict[str, Any]) -> list[str]:
                 f"!= CB.currency_issued={cb.currency_issued} Δ={diff:.4f}"
             )
 
-    # ─── 5. 政府债券: 发行 = 持有 ───
+    # ─── 5. 政府债券: 发行 = 持有 (HH + 银行 + CB) ───
     if gov is not None and b is not None and cb is not None:
-        held = b.gov_bonds_held + cb.gov_bonds
+        hh_bonds = hh.bonds if hh is not None else 0.0
+        held = b.gov_bonds_held + cb.gov_bonds + hh_bonds
         diff = held - gov.bonds_outstanding
         if abs(diff) > _tolerance(held, gov.bonds_outstanding):
             errors.append(
-                f"Bond mismatch: Banks+CB holdings={held} "
+                f"Bond mismatch: HH+Banks+CB holdings={held} "
                 f"!= Gov.bonds_outstanding={gov.bonds_outstanding} Δ={diff:.4f}"
             )
 
+    # ─── 6. 家庭贷款: 家庭负债 = 银行对家庭债权 ───
+    if hh is not None and b is not None:
+        hh_loans = hh.mortgage + hh.consumer_loan + hh.other_debt
+        diff = hh_loans - b.loans_to_households
+        if abs(diff) > _tolerance(hh_loans, b.loans_to_households):
+            errors.append(
+                f"HH loan mismatch: HH liabilities={hh_loans} "
+                f"!= Banks.loans_to_households={b.loans_to_households} Δ={diff:.4f}"
+            )
+
+    # ─── 7. 企业贷款: 企业负债 = 银行对企业债权 ───
+    if f is not None and b is not None:
+        diff = f.bank_loans - b.loans_to_firms
+        if abs(diff) > _tolerance(f.bank_loans, b.loans_to_firms):
+            errors.append(
+                f"Firm loan mismatch: Firms.bank_loans={f.bank_loans} "
+                f"!= Banks.loans_to_firms={b.loans_to_firms} Δ={diff:.4f}"
+            )
+
+    # ─── 8. 财政部存款: 政府资产 = CB 负债 ───
+    if gov is not None and cb is not None:
+        cb_treasury = getattr(cb, "treasury_deposits", 0.0)
+        diff = gov.treasury_deposits - cb_treasury
+        if abs(diff) > _tolerance(gov.treasury_deposits, cb_treasury):
+            errors.append(
+                f"Treasury deposit mismatch: Gov.treasury_deposits="
+                f"{gov.treasury_deposits} != CB.treasury_deposits={cb_treasury} "
+                f"Δ={diff:.4f}"
+            )
+
+    return errors
+
+
+def validate_housing_stock(
+    units_held_by_households: int,
+    units_held_as_reo: int,
+    total_units: int,
+) -> list[str]:
+    """校验实物住房存量守恒: 家庭持有 + 银行止赎 = 市场总量.
+
+    住房是实物资产, 不需要金融对手方, 但**数量必须守恒** — 止赎/甩卖只是
+    所有权转移, 不能凭空销毁房屋. 历史 bug: fire-sale 阶段把 REO 计数直接
+    归零, 房子人间蒸发.
+    """
+    errors: list[str] = []
+    held = units_held_by_households + units_held_as_reo
+    if held != total_units:
+        errors.append(
+            f"Housing stock mismatch: households={units_held_by_households} "
+            f"+ REO={units_held_as_reo} = {held} != total_units={total_units}"
+        )
     return errors

@@ -106,6 +106,7 @@ class CommercialBankBalanceSheet:
     loans_to_households: float = 0.0
     gov_bonds_held: float = 0.0
     interbank_claims: float = 0.0
+    reo_value: float = 0.0          # 止赎房产 (实物资产, 按清算价入账)
     # ── 负债 ──
     deposits_from_hh: float = 0.0
     deposits_from_firms: float = 0.0
@@ -117,7 +118,7 @@ class CommercialBankBalanceSheet:
     def sum_assets(self) -> float:
         return (
             self.reserves + self.loans_to_firms + self.loans_to_households
-            + self.gov_bonds_held + self.interbank_claims
+            + self.gov_bonds_held + self.interbank_claims + self.reo_value
         )
 
     def sum_liabilities(self) -> float:
@@ -177,6 +178,7 @@ class CentralBankBalanceSheet:
     # ── 负债 ──
     bank_reserves: float = 0.0
     currency_issued: float = 0.0
+    treasury_deposits: float = 0.0   # 财政部在 CB 的存款 (政府侧为资产)
     # ── 资本 ──
     capital: float = 0.0
 
@@ -184,7 +186,7 @@ class CentralBankBalanceSheet:
         return self.gov_bonds + self.lolr_claims + self.other_assets
 
     def sum_liabilities(self) -> float:
-        return self.bank_reserves + self.currency_issued
+        return self.bank_reserves + self.currency_issued + self.treasury_deposits
 
     @property
     def net_worth(self) -> float:

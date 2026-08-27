@@ -26,7 +26,7 @@ class SimConfig(BaseModel):
     n_households: int = Field(default=1000, ge=1)
     n_firms_per_sector: int = Field(default=50, ge=1)
     sectors: list[str] = Field(default_factory=lambda: ["consumer_goods"])
-    n_banks: int = Field(default=1, ge=1)
+    # n_banks 定义在 "Multi-bank (Phase 2)" 分组, 见下文 (此处不重复声明)
 
     # Initial conditions
     initial_gdp: float = 1000.0
@@ -57,6 +57,22 @@ class SimConfig(BaseModel):
     loan_rate_car_pressure: float = 0.5   # CAR 每低于缓冲 1pt → 利差 +
     car_requirement: float = 0.08         # 资本充足率要求
     car_buffer: float = 0.02              # 缓冲 (低于 requirement+buffer 加价)
+    initial_bank_car: float = 0.12         # 初始 CAR 目标 (反解准备金/资本的锚)
+    bank_dividend_payout: float = 0.6      # 超额资本的月度分红比例 (给家庭股东)
+    bank_dividend_car_target: float = 0.14  # 分红后要保留的 CAR (超额部分才分)
+
+    # ── Bond market (P0-b) ──
+    enable_bond_market: bool = False       # ⚠️ 默认关闭 — 见 docs/IMPLEMENTATION.md §5.0 P0-b
+    bond_coupon_rate: float = 0.025        # 票息率 (= 默认 policy_rate; 上层可改)
+    bond_issuance_household_share: float = 0.7  # 新发债中给家庭的比例 (银行 1-此)
+    bond_max_debt_to_gdp: float = 1.5      # 债务/GDP 上限 (debt brake)
+
+    # ── Consumer credit (P0-a) ──
+    enable_consumer_credit: bool = False  # ⚠️ 默认关闭 — 同 P0-b 原因
+    consumer_loan_spread: float = 0.05    # 消费贷利率相对 policy_rate 的溢价
+    consumer_loan_dti_limit: float = 0.40 # DTI 上限
+    consumer_loan_term_months: int = 60   # 期限 (5 年)
+    consumer_loan_lending_fraction: float = 0.7  # 银行配给: 合格申请中批准的比例
 
     # ── Firm (投资/折旧/定价) ──
     depreciation_rate: float = 0.01           # δ, 月度
@@ -116,6 +132,8 @@ class SimConfig(BaseModel):
     fire_sale_price_impact: float = 0.05    # 1 单位抛售压低 X% 的市场价
     bank_failure_car_threshold: float = 0.04  # CAR < 此值触发处置
     lolr_rate_spread: float = 0.01          # 最后贷款人利率溢价
+    mortgage_liquidation_discount: float = 0.70  # 止赎房产清算折扣 (0.7 = 70% 价格)
+    enable_reo_liquidation: bool = True     # REO 是否卖给家庭 (False=保留在账)
 
     # Other settings (legacy)
     enable_brock_hommes: bool = False

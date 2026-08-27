@@ -26,9 +26,10 @@ class CommercialBank:
     # ── 资产 ──
     reserves: float = 0.0
     loans_to_firms: float = 0.0
-    loans_to_households: float = 0.0      # 包括抵押贷款 (Phase 2)
+    loans_to_households: float = 0.0      # 包括抵押贷款 (Phase 2) + 消费贷 (P0-a)
     gov_bonds_held: float = 0.0
     interbank_claims: float = 0.0         # 同业拆出 (Phase 2)
+    reo_value: float = 0.0                # 止赎房产账面值 (实物资产, 清算价入账)
 
     # ── 负债 ──
     deposits_from_hh: float = 0.0
@@ -66,6 +67,7 @@ class CommercialBank:
             + self.loans_to_households
             + self.gov_bonds_held
             + self.interbank_claims
+            + self.reo_value
         )
 
     def total_liabilities(self) -> float:
