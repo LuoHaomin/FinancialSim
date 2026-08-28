@@ -309,8 +309,13 @@ class Simulation:
                     f.deposits for f in firms
                     if f.home_bank_id == b.id
                 )
-            # firm loan 暂留 banks[0] (PR-3d 拆); 房贷留 banks[0] (PR-3e)
-            banks[0].loans_to_firms = firm_deposits_actual
+            # firm loan 按 home_bank 分配 (PR-3d 镜像; 之前暂留 banks[0] 会导致
+            # firm 在 bank_3 还款时 banks[0].loans_to_firms 不变 → 镜像不平衡)
+            for b in banks:
+                    b.loans_to_firms = sum(
+                        f.debt for f in firms if f.home_bank_id == b.id
+                    )
+            # 房贷暂留 banks[0] (PR-3e 拆)
             banks[0].loans_to_households = total_mortgages
             # reserves 按 market_share 分配 (残差 banks[0] 吸收)
             for b in banks:

@@ -566,35 +566,50 @@ def _bank_cycle(state: SimulationState) -> None:
     - 收贷款利息 (firm 有存款):   firm.deposits −i / bank.deposits_from_firms −i / bank.capital +i
       (firm 无存款): 债务资本化   firm.debt +i / bank.loans_to_firms +i
     - 付存款利息: hh/firm 存款 +d / 对应负债 +d / bank.capital −d
+
+    Phase 3.5 PR-3d: 多银行时每家银行独立 set_rates + 利息流按 firm/HH 的
+    home_bank 镜像. 单银行维持主银行语义快路径.
     """
     bank = state.bank
     cb = state.central_bank
     assert bank is not None
     assert cb is not None
 
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
+
+    # 多银行时每家银行独立 set_rates; 单银行直接复用 banks[0]
     loan_rate, deposit_rate = bank.set_rates(cb.policy_rate)
+    bank_rates: dict[str, tuple[float, float]] = {}
+    if multi_bank:
+        for b in state.banks:
+            lr, dr = b.set_rates(cb.policy_rate)
+            bank_rates[b.id] = (lr, dr)
 
     # ── 贷款利息 (逐企业: 有存款付现金, 没存款资本化) ──
     for firm in state.firms:
-        loan_interest = firm.debt * loan_rate / 12.0
+        if multi_bank:
+            lr, _dr = bank_rates[firm.home_bank_id]
+            f_bank = bank_by_id[firm.home_bank_id]
+        else:
+            lr = loan_rate
+            f_bank = bank
+        loan_interest = firm.debt * lr / 12.0
         if loan_interest <= 0:
             continue
         if firm.deposits >= loan_interest:
-            # 现金支付: 借款人存款 −i / 银行负债 −i / 资本 +i
             firm.deposits -= loan_interest
-            bank.deposits_from_firms -= loan_interest
-            bank.book_loan_interest_income(loan_interest)
+            f_bank.deposits_from_firms -= loan_interest  # type: ignore[attr-defined]
+            f_bank.book_loan_interest_income(loan_interest)
         else:
-            # 资本化: 计入借款人债务 / 银行应收资产 ↑;
-            # 权责发生制下同时确认利息收入进资本, 保持 A = L + capital
             firm.debt += loan_interest
-            bank.loans_to_firms += loan_interest
-            bank.book_loan_interest_income(loan_interest)
+            f_bank.loans_to_firms += loan_interest  # type: ignore[attr-defined]
+            f_bank.book_loan_interest_income(loan_interest)
 
-    # ── 本金摊还 (校准 2026-08): 此前只付息不还本, 工资发放时点的
-    # 营运资本透支会永久累积并资本化利息, 净资产被慢性侵蚀 →
-    # 稳态运行 ~100 个月后技术性破产. 规则: 现金超过一个月工资单的
-    # 盈余按比例还本 (SFC: firm.deposits−R / debt−R / bank 两科目镜像).
+    # ── 本金摊还 (PR-3d 多银行: 还本走 firm 的 home_bank) ──
     repay_speed = float(_cfg(state, "firm_loan_repayment_speed", 0.30))
     if repay_speed > 0:
         for firm in state.firms:
@@ -607,56 +622,114 @@ def _bank_cycle(state: SimulationState) -> None:
                 continue
             firm.deposits -= repay
             firm.debt = max(0.0, firm.debt - repay)
-            bank.loans_to_firms = max(0.0, bank.loans_to_firms - repay)
-            bank.deposits_from_firms -= repay
+            if multi_bank:
+                f_bank = bank_by_id[firm.home_bank_id]
+            else:
+                f_bank = bank
+            f_bank.loans_to_firms = max(  # type: ignore[attr-defined]
+                0.0, f_bank.loans_to_firms - repay  # type: ignore[attr-defined]
+            )
+            f_bank.deposits_from_firms -= repay  # type: ignore[attr-defined]
 
-    # ── 存款利息 ──
-    int_hh = bank.deposits_from_hh * deposit_rate / 12.0
-    firm_dep_total = sum(f.deposits for f in state.firms)
-    int_firm = firm_dep_total * deposit_rate / 12.0
-    if int_hh > 0:
-        per_hh = int_hh / max(1, sum(1 for h in state.households if h.deposits > 0))
-        distributed = 0.0
-        # 按人均分配 + 把舍入残差分配给最后一人 (避免 deposit drift)
-        eligible = [h for h in state.households if h.deposits > 0]
-        for idx, h in enumerate(eligible):
-            pay = per_hh if idx < len(eligible) - 1 else (int_hh - distributed)
-            h.deposits += pay
-            distributed += pay
-        bank.deposits_from_hh += int_hh
+    # ── 存款利息 (PR-3d 多银行: 每家银行独立付其 HH/firm 存款利息) ──
+    int_hh_total = 0.0
+    int_firm_total = 0.0
+    if multi_bank:
+        for b in state.banks:
+            _lr, dr = bank_rates[b.id]
+            int_hh = b.deposits_from_hh * dr / 12.0
+            firm_dep_at_bank = sum(
+                f.deposits for f in state.firms
+                if f.home_bank_id == b.id
+            )
+            int_firm = firm_dep_at_bank * dr / 12.0
+            int_hh_total += int_hh
+            int_firm_total += int_firm
+            if int_hh > 0:
+                # 按 deposit 比例分给这家银行的 HH (按 home_bank_id)
+                hh_at_bank = [h for h in state.households if h.home_bank_id == b.id and h.deposits > 0]
+                if hh_at_bank:
+                    per_hh = int_hh / len(hh_at_bank)
+                    distributed = 0.0
+                    for idx, h in enumerate(hh_at_bank):
+                        pay = per_hh if idx < len(hh_at_bank) - 1 else (int_hh - distributed)
+                        h.deposits += pay
+                        distributed += pay
+                    b.deposits_from_hh += int_hh
+            if int_firm > 0 and firm_dep_at_bank > 0:
+                firms_at_bank = [f for f in state.firms if f.home_bank_id == b.id and f.deposits > 0]
+                if firms_at_bank:
+                    distributed = 0.0
+                    for idx, f in enumerate(firms_at_bank):
+                        if idx < len(firms_at_bank) - 1:
+                            pay = int_firm * f.deposits / firm_dep_at_bank
+                            distributed += pay
+                        else:
+                            pay = int_firm - distributed
+                        f.deposits += pay
+                    b.deposits_from_firms += int_firm
+            b.book_deposit_interest_expense(int_hh + int_firm)
+    else:
+        int_hh = bank.deposits_from_hh * deposit_rate / 12.0
+        firm_dep_total = sum(f.deposits for f in state.firms)
+        int_firm = firm_dep_total * deposit_rate / 12.0
+        int_hh_total = int_hh
+        int_firm_total = int_firm
+        if int_hh > 0:
+            per_hh = int_hh / max(1, sum(1 for h in state.households if h.deposits > 0))
+            distributed = 0.0
+            eligible = [h for h in state.households if h.deposits > 0]
+            for idx, h in enumerate(eligible):
+                pay = per_hh if idx < len(eligible) - 1 else (int_hh - distributed)
+                h.deposits += pay
+                distributed += pay
+            bank.deposits_from_hh += int_hh
+        if int_firm > 0 and firm_dep_total > 0:
+            eligible_firms = [f for f in state.firms if f.deposits > 0]
+            distributed = 0.0
+            for idx, f in enumerate(eligible_firms):
+                if idx < len(eligible_firms) - 1:
+                    pay = int_firm * f.deposits / firm_dep_total
+                    distributed += pay
+                else:
+                    pay = int_firm - distributed
+                f.deposits += pay
+            bank.deposits_from_firms += int_firm
+        bank.book_deposit_interest_expense(int_hh + int_firm)
 
     # ── 央行准备金付息 (IOR, floor system; 校准 2026-08) ──
-    # 现实央行对商业银行准备金按政策利率付息. 此前缺失时, 银行的存款
-    # 负债端 (~70k) 只有微小贷款资产端 (~几 k) 提供利息收入, 政策利率一升,
-    # 银行资本被机械性放血 → 每 ~10 年一次非行为性的"窄银行危机".
-    # 记账 (SFC): 银行 reserves ↑I / capital ↑I (CB 承担付息, 不进镜像).
+    # PR-3d: 多银行时每家银行独立计 IOR, 残差给 banks[0]
     if bool(_cfg(state, "enable_interest_on_reserves", True)):
-        reserve_base = max(
-            0.0,
-            bank.deposits_from_hh + bank.deposits_from_firms
-            + getattr(bank, "deposits_from_nbfi", 0.0)
-            - bank.loans_to_firms - bank.loans_to_households,
-        )
-        ior_payment = reserve_base * float(cb.policy_rate) / 12.0
-        if ior_payment > 1e-9:
-            bank.reserves += ior_payment
-            bank.capital += ior_payment
-            # 央行镜像: 负债端创造准备金, 对应计为 CB 利息支出 (资本↓),
-            # 现实含义是央行上缴财政的利润减少.
-            cb.bank_reserves += ior_payment
-            cb.capital -= ior_payment
-    if int_firm > 0 and firm_dep_total > 0:
-        eligible_firms = [f for f in state.firms if f.deposits > 0]
-        distributed = 0.0
-        for idx, f in enumerate(eligible_firms):
-            if idx < len(eligible_firms) - 1:
-                pay = int_firm * f.deposits / firm_dep_total
-                distributed += pay
-            else:
-                pay = int_firm - distributed  # 残差: 保证求和逐位一致
-            f.deposits += pay
-        bank.deposits_from_firms += int_firm
-    bank.book_deposit_interest_expense(int_hh + int_firm)
+        if multi_bank:
+            total_ior = 0.0
+            for b in state.banks:
+                reserve_base = max(
+                    0.0,
+                    b.deposits_from_hh + b.deposits_from_firms
+                    + getattr(b, "deposits_from_nbfi", 0.0)
+                    - b.loans_to_firms - b.loans_to_households,
+                )
+                ior_payment = reserve_base * float(cb.policy_rate) / 12.0
+                if ior_payment > 1e-9:
+                    b.reserves += ior_payment
+                    b.capital += ior_payment
+                    total_ior += ior_payment
+            if total_ior > 1e-9:
+                cb.bank_reserves += total_ior
+                cb.capital -= total_ior
+        else:
+            reserve_base = max(
+                0.0,
+                bank.deposits_from_hh + bank.deposits_from_firms
+                + getattr(bank, "deposits_from_nbfi", 0.0)
+                - bank.loans_to_firms - bank.loans_to_households,
+            )
+            ior_payment = reserve_base * float(cb.policy_rate) / 12.0
+            if ior_payment > 1e-9:
+                bank.reserves += ior_payment
+                bank.capital += ior_payment
+                cb.bank_reserves += ior_payment
+                cb.capital -= ior_payment
 
 
 # ════════════════════════════════════════════════════════════
