@@ -749,15 +749,23 @@ def _bank_dividend_cycle(state: SimulationState) -> None:
                                      体现: 以前是 capital, 现在是 deposits)
       h.deposits ↑D
     净效果: bank.A 不变, bank.L ↑D, bank.cap ↓D → A = L + cap 保持 ✓.
+
+    PR-3f: 多银行时每家银行的分红按 HH 的 home_bank 加 deposits_from_hh.
     """
     if not bool(_cfg(state, "enable_bank_dividends", True)):
         return
     if state.bank is None:
         return
     bank = state.bank
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
     payout_ratio = float(_cfg(state, "bank_dividend_payout", 0.6))
     target_car = float(_cfg(state, "bank_dividend_car_target", 0.10))
-    total_dividend = 0.0
+    # PR-3f: per-bank 累计分红(各银行自有 capital → 自己的 deposits_from_hh)
+    dividend_by_bank: dict[str, float] = {}
     for b in state.banks:
         car = b.car()
         if car <= target_car or car == float("inf"):
@@ -768,19 +776,26 @@ def _bank_dividend_cycle(state: SimulationState) -> None:
         payout = payout_ratio * excess
         # 银行侧: capital 减, deposits_from_hh 增 (账面转移, 无现金流动)
         b.capital -= payout
-        # 在聚合 BS 中: bank.deposits_from_hh += payout (下面统一加)
-        total_dividend += payout
-    if total_dividend <= 0:
+        dividend_by_bank[b.id] = dividend_by_bank.get(b.id, 0.0) + payout
+    if not dividend_by_bank or sum(dividend_by_bank.values()) <= 0:
         return
-    # 把分红按 deposits 比例分给家庭
+    # 把分红按 HH 存款比例分给家庭, 同时按 HH 的 home_bank 加各银行 deposits_from_hh
     hh_total_dep = sum(h.deposits for h in state.households)
     if hh_total_dep <= 0:
         return
-    for h in state.households:
-        share = h.deposits / hh_total_dep
-        pay = share * total_dividend
-        h.deposits += pay
-    bank.deposits_from_hh += total_dividend  # L↑, 镜像 HH 存款增
+    if multi_bank:
+        # per-bank 分红先按 share 比例切到 HH (按 HH 的 home_bank 累计)
+        for h in state.households:
+            share = h.deposits / hh_total_dep
+            h.deposits += share * sum(dividend_by_bank.values())
+        for bid, amt in dividend_by_bank.items():
+            bank_by_id[bid].deposits_from_hh += amt  # type: ignore[attr-defined]
+    else:
+        for h in state.households:
+            share = h.deposits / hh_total_dep
+            pay = share * sum(dividend_by_bank.values())
+            h.deposits += pay
+        bank.deposits_from_hh += sum(dividend_by_bank.values())
 
 
 # ════════════════════════════════════════════════════════════
@@ -1969,6 +1984,8 @@ def _default_resolution(state: SimulationState) -> None:
     检测 → 处置 → 银行核销 → 计时 → (cool-down 后) 再注资.
     SFC 注记: declare_bankruptcy 已把 firm.debt 减为 0, 此时银行核销贷款与
     资本同步下降, 资产-负债恒等式保持.
+
+    PR-3f: 多银行时违约走 firm 的 home_bank; recapitalize 同.
     """
     if not bool(_cfg(state, "enable_default", True)):
         return
@@ -1977,10 +1994,20 @@ def _default_resolution(state: SimulationState) -> None:
     if bank is None or not state.firms:
         return
 
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
+
     cooldown = int(_cfg(state, "default_cooldown_months", DEFAULT_COOLDOWN_MONTHS))
     recap_amount = float(_cfg(state, "recovery_capital_amount", 100.0))
 
     for firm in state.firms:
+        if multi_bank:
+            f_bank = bank_by_id[firm.home_bank_id]
+        else:
+            f_bank = bank
         # ── 1. 检测违约 (净资产 < 阈值 且 未破产) ──
         if not firm.is_bankrupt and firm.is_default():
             logger.info(f"Default detected at t={state.t}: {firm.id} equity={firm.equity():.2f}")
@@ -1991,28 +2018,25 @@ def _default_resolution(state: SimulationState) -> None:
             # 企业存款幽灵增量被 SFC 捕获. 镜像: 银行接收等额清算资产.
             #   bank: seized_assets ↑R / deposits_from_firms ↑R  (A=L+cap 保持)
             if detail["recovered"] > 0:
-                bank.seized_assets += detail["recovered"]
-                bank.deposits_from_firms += detail["recovered"]
+                f_bank.seized_assets += detail["recovered"]  # type: ignore[attr-defined]
+                f_bank.deposits_from_firms += detail["recovered"]  # type: ignore[attr-defined]
 
             # 银行镜像 (SFC 同步):
-            # 还款部分: firm 用存款还债 → A −X (loans), L −X (deposits)
-            # 注: 准备金不变 (SFC 模型中借贷流程不动准备金)
             if detail["debt_repaid"] > 0:
-                bank.deposits_from_firms = max(
-                    0.0, bank.deposits_from_firms - detail["debt_repaid"]
+                f_bank.deposits_from_firms = max(  # type: ignore[attr-defined]
+                    0.0, f_bank.deposits_from_firms - detail["debt_repaid"]  # type: ignore[attr-defined]
                 )
-                bank.loans_to_firms = max(
-                    0.0, bank.loans_to_firms - detail["debt_repaid"]
+                f_bank.loans_to_firms = max(  # type: ignore[attr-defined]
+                    0.0, f_bank.loans_to_firms - detail["debt_repaid"]  # type: ignore[attr-defined]
                 )
 
             # 未偿还部分: 银行核销 (loans 减, capital 减)
-            #   A −X (loans), capital −X; L 不变 ✓
             if detail["debt_unpaid"] > 0:
-                bank.mark_npl(detail["debt_unpaid"])
-                written = bank.write_off_loan(detail["debt_unpaid"])
+                f_bank.mark_npl(detail["debt_unpaid"])  # type: ignore[attr-defined]
+                written = f_bank.write_off_loan(detail["debt_unpaid"])  # type: ignore[attr-defined]
                 logger.info(
                     f"  Bank wrote off {written:.2f}, "
-                    f"CAR now {bank.car():.3f}"
+                    f"CAR now {f_bank.car():.3f}"  # type: ignore[attr-defined]
                 )
 
             # 解雇该企业员工 (联动 HH 失业状态)
@@ -2025,8 +2049,8 @@ def _default_resolution(state: SimulationState) -> None:
             firm.tick_bankruptcy()
             if firm.months_bankrupt >= cooldown:
                 # 银行新贷款注入资本: A 与 L 同步增加
-                bank.loans_to_firms += recap_amount
-                bank.deposits_from_firms += recap_amount
+                f_bank.loans_to_firms += recap_amount  # type: ignore[attr-defined]
+                f_bank.deposits_from_firms += recap_amount  # type: ignore[attr-defined]
                 firm.recapitalize(recap_amount)
                 logger.info(
                     f"Recapitalized {firm.id} at t={state.t}: "
