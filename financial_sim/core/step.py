@@ -2293,6 +2293,12 @@ def _mortgage_default_check(state: SimulationState) -> None:
     if bank is None:
         return
 
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
+
     missed_threshold = int(_cfg(state, "mortgage_missed_payment_limit", 3))
     underwater_months_threshold = int(
         _cfg(state, "mortgage_underwater_months_threshold", 6)
@@ -2328,15 +2334,21 @@ def _mortgage_default_check(state: SimulationState) -> None:
         recovery_value = house_value * liquidation_discount  # R ≤ M (默认折扣≤1)
         loss = mortgage - recovery_value                     # 银行承担的损失
 
+        # PR-3f: 多银行时按 HH 的 home_bank 走账户调整
+        if multi_bank:
+            m_bank = bank_by_id[h.home_bank_id]
+        else:
+            m_bank = bank
+
         # ── 银行账本: 资产端重组, 资本减损失 ──
-        bank.loans_to_households = max(
-            0.0, bank.loans_to_households - mortgage
+        m_bank.loans_to_households = max(  # type: ignore[attr-defined]
+            0.0, m_bank.loans_to_households - mortgage  # type: ignore[attr-defined]
         )
-        bank.reo_value += recovery_value
-        bank.capital -= loss
-        bank.npl_mortgages += mortgage
-        bank.mark_npl(mortgage)
-        bank.npl_writes_off_cumulative += loss  # 教学诊断: 累计实现损失
+        m_bank.reo_value += recovery_value  # type: ignore[attr-defined]
+        m_bank.capital -= loss  # type: ignore[attr-defined]
+        m_bank.npl_mortgages += mortgage  # type: ignore[attr-defined]
+        m_bank.mark_npl(mortgage)  # type: ignore[attr-defined]
+        m_bank.npl_writes_off_cumulative += loss  # type: ignore[attr-defined]
         npl_marked += mortgage
 
         # ── 家庭账本: 房贷归零, 房子所有权转银行 (数量守恒) ──
@@ -2344,7 +2356,7 @@ def _mortgage_default_check(state: SimulationState) -> None:
         h.mortgage_balance = 0.0
         h.housing_units = 0
         h.months_underwater = 0
-        bank.reo_properties += units
+        m_bank.reo_properties += units  # type: ignore[attr-defined]
 
         logger.info(
             f"  Mortgage default: HH {h.id}, LTV={ltv:.2f}, "
@@ -2354,8 +2366,11 @@ def _mortgage_default_check(state: SimulationState) -> None:
         )
 
     if npl_marked > 0:
+        # fire_sale_pressure 是状态字段, 单值; 不按银行拆分
         state.fire_sale_pressure = min(
-            1.0, state.fire_sale_pressure + bank.reo_properties * 0.001
+            1.0, state.fire_sale_pressure + sum(
+                b.reo_properties for b in state.banks
+            ) * 0.001
         )
 
 
