@@ -743,24 +743,53 @@ def _government_cycle(state: SimulationState) -> None:
     income_tax_rate = _effective_income_tax_rate(state, income_tax_rate_base)
     corp_tax_rate = float(_cfg(state, "corp_tax_rate", 0.21))
 
+    # ── PR-3c: 多银行 home_bank 查表 ──
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
+
     # ── 收入税 (从工资中预扣; 同时下调 h.income 为税后口径) ──
     total_income_tax = 0.0
+    income_tax_by_bank: dict[str, float] = {}
     for h in state.households:
         if h.employed and h.income > 0:
             t = h.income * income_tax_rate
             h.deposits -= t
             h.income -= t
             total_income_tax += t
-    bank.deposits_from_hh -= total_income_tax
+            if multi_bank:
+                bid = h.home_bank_id
+                income_tax_by_bank[bid] = income_tax_by_bank.get(bid, 0.0) + t
+    if multi_bank:
+        for bid, amt in income_tax_by_bank.items():
+            bank_by_id[bid].deposits_from_hh -= amt  # type: ignore[attr-defined]
+        residual = total_income_tax - sum(income_tax_by_bank.values())
+        if abs(residual) > 1e-9:
+            bank_by_id[list(bank_by_id.values())[0].id].deposits_from_hh -= residual  # type: ignore[attr-defined]
+    else:
+        bank.deposits_from_hh -= total_income_tax
 
     # ── 公司税 (逐企业) ──
     corp_tax_total = 0.0
+    corp_tax_by_bank: dict[str, float] = {}
     for f in state.firms:
         t = max(0.0, f.profit()) * corp_tax_rate
         t = min(t, f.deposits)
         f.deposits -= t
         corp_tax_total += t
-    bank.deposits_from_firms -= corp_tax_total
+        if multi_bank:
+            bid = f.home_bank_id
+            corp_tax_by_bank[bid] = corp_tax_by_bank.get(bid, 0.0) + t
+    if multi_bank:
+        for bid, amt in corp_tax_by_bank.items():
+            bank_by_id[bid].deposits_from_firms -= amt  # type: ignore[attr-defined]
+        residual = corp_tax_total - sum(corp_tax_by_bank.values())
+        if abs(residual) > 1e-9:
+            bank_by_id[list(bank_by_id.values())[0].id].deposits_from_firms -= residual  # type: ignore[attr-defined]
+    else:
+        bank.deposits_from_firms -= corp_tax_total
     gov.tax_revenue = total_income_tax + corp_tax_total
 
     # ── 政府购买 G (流入 firm) 与失业救济 TR (流入失业家庭) ──
@@ -775,16 +804,28 @@ def _government_cycle(state: SimulationState) -> None:
     total_benefits = benefit_per_hh * len(unemployed)
     if total_benefits > 0 and unemployed:
         per_hh = total_benefits / len(unemployed)
+        benefits_by_bank: dict[str, float] = {}
         for h in unemployed:
             h.deposits += per_hh
             h.income = per_hh
-        bank.deposits_from_hh += total_benefits
+            if multi_bank:
+                bid = h.home_bank_id
+                benefits_by_bank[bid] = benefits_by_bank.get(bid, 0.0) + per_hh
+        if multi_bank:
+            for bid, amt in benefits_by_bank.items():
+                bank_by_id[bid].deposits_from_hh += amt  # type: ignore[attr-defined]
+            residual = total_benefits - sum(benefits_by_bank.values())
+            if abs(residual) > 1e-9:
+                bank_by_id[list(bank_by_id.values())[0].id].deposits_from_hh += residual  # type: ignore[attr-defined]
+        else:
+            bank.deposits_from_hh += total_benefits
     if g_spending > 0:
         # Week B: 政府购买改为真实市场采购 — 抽库存 + 计入企业销售额.
         # 此前 G 是"凭空注资" (只加存款不扣库存), 需求基数因此缺失 G 的
         # 一块, 动态劳动需求会让就业自我塌缩 (实测单部门 24 月失业 85%).
         # 库存不足时按可成交量收账 (未成交部分政府不付款).
         served_total = 0.0
+        g_by_bank: dict[str, float] = {}
         for f, req in _distribute_to_firms(state, g_spending, shares):
             units = min(req / max(f.price, 1e-9), f.inventory)  # 金额→数量
             served = units * f.price
@@ -793,7 +834,17 @@ def _government_cycle(state: SimulationState) -> None:
             f.last_sales += served              # 金额口径 (与消费一致)
             f.last_demand += req
             served_total += served
-        bank.deposits_from_firms += served_total
+            if multi_bank:
+                bid = f.home_bank_id
+                g_by_bank[bid] = g_by_bank.get(bid, 0.0) + served
+        if multi_bank:
+            for bid, amt in g_by_bank.items():
+                bank_by_id[bid].deposits_from_firms += amt  # type: ignore[attr-defined]
+            residual = served_total - sum(g_by_bank.values())
+            if abs(residual) > 1e-9:
+                bank_by_id[list(bank_by_id.values())[0].id].deposits_from_firms += residual  # type: ignore[attr-defined]
+        else:
+            bank.deposits_from_firms += served_total
         # 赤字融资只覆盖实际支出
         g_spending = served_total
 
@@ -801,12 +852,21 @@ def _government_cycle(state: SimulationState) -> None:
     gov.gov_spending = g_spending
 
     # ── 赤字融资: 发行国债给 CB, 换成准备金注入银行体系 ──
+    # PR-3c: 多银行时,准备金按 market_share 分配到各银行(残差给 banks[0])
     injection = g_spending + total_benefits - gov.tax_revenue
     if abs(injection) > 0:
         gov.debt += injection            # 发行(+)/回购(−)
         cb.gov_bonds += injection        # CB 承接
         cb.bank_reserves += injection    # 准备金注入/回笼
-        bank.reserves += injection       # 与 CB 账目镜像
+        if multi_bank:
+            for b in state.banks:
+                share_amt = injection * b.market_share
+                b.reserves += share_amt
+            state.banks[0].reserves += injection - sum(
+                injection * b.market_share for b in state.banks
+            )
+        else:
+            bank.reserves += injection       # 与 CB 账目镜像
         # 准备金的归宿由 P0-b 的 _bond_cycle 接管:
         # 政府用注入的现金去买私人部门的债 → 私人部门存款↓, 政府 treasury↑.
         # 因此本阶段**不**直接增 gov.treasury_deposits (避免双记账).
