@@ -2137,7 +2137,14 @@ def _housing_cycle(state: SimulationState) -> None:
 
     cb = state.central_bank
 
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
+
     # 1. 月供 (利息 → 银行资本; 本金 → 减少按揭余额) + 断供计数
+    # PR-3e: 多银行时月供走 HH 的 home_bank (mortgage 持有方)
     for h in state.households:
         if h.mortgage_balance <= 0:
             continue
@@ -2158,12 +2165,16 @@ def _housing_cycle(state: SimulationState) -> None:
         principal_paid = payment - interest_paid
         # 镜像记账
         h.deposits -= payment
-        bank.deposits_from_hh -= payment
+        if multi_bank:
+            m_bank = bank_by_id[h.home_bank_id]
+        else:
+            m_bank = bank
+        m_bank.deposits_from_hh -= payment  # type: ignore[attr-defined]
         h.mortgage_balance -= principal_paid
-        bank.loans_to_households = max(
-            0.0, bank.loans_to_households - principal_paid
+        m_bank.loans_to_households = max(  # type: ignore[attr-defined]
+            0.0, m_bank.loans_to_households - principal_paid  # type: ignore[attr-defined]
         )
-        bank.capital += interest_paid  # 利息是银行资本增长
+        m_bank.capital += interest_paid  # type: ignore[attr-defined]
 
     # 2. 房租收入 (HH 内部转账, SFC 自平衡: 双方均镜像银行账目)
     rental_yield = housing.rent  # 月租金
@@ -2173,18 +2184,40 @@ def _housing_cycle(state: SimulationState) -> None:
             (h.housing_units - 1) * rental_yield for h in landlords
         )
         # 收方: 房东存款 ↑, bank.deposits_from_hh ↑
+        rent_by_bank: dict[str, float] = {}
         for h in landlords:
             rent_received = (h.housing_units - 1) * rental_yield
             h.deposits += rent_received
             h.rental_income = rent_received
-            bank.deposits_from_hh += rent_received
+            if multi_bank:
+                bid = h.home_bank_id
+                rent_by_bank[bid] = rent_by_bank.get(bid, 0.0) + rent_received
+        if multi_bank:
+            for bid, amt in rent_by_bank.items():
+                bank_by_id[bid].deposits_from_hh += amt  # type: ignore[attr-defined]
+            residual = total_rent - sum(rent_by_bank.values())
+            if abs(residual) > 1e-9:
+                bank_by_id[list(bank_by_id.values())[0].id].deposits_from_hh += residual  # type: ignore[attr-defined]
+        else:
+            bank.deposits_from_hh += total_rent
         # 付方: 所有租户 (housing_units == 1) 平摊, bank.deposits_from_hh ↓
         renters = [h for h in state.households if h.housing_units <= 1]
         if renters:
             per_renter = total_rent / len(renters)
+            rent_pay_by_bank: dict[str, float] = {}
             for h in renters:
                 h.deposits -= per_renter
-                bank.deposits_from_hh -= per_renter
+                if multi_bank:
+                    bid = h.home_bank_id
+                    rent_pay_by_bank[bid] = rent_pay_by_bank.get(bid, 0.0) + per_renter
+            if multi_bank:
+                for bid, amt in rent_pay_by_bank.items():
+                    bank_by_id[bid].deposits_from_hh -= amt  # type: ignore[attr-defined]
+                residual = total_rent - sum(rent_pay_by_bank.values())
+                if abs(residual) > 1e-9:
+                    bank_by_id[list(bank_by_id.values())[0].id].deposits_from_hh -= residual  # type: ignore[attr-defined]
+            else:
+                bank.deposits_from_hh -= total_rent
 
     # 3. 房价调整 (租金锚定 + 利率反馈 + 泡沫因子)
     housing.revalue(policy_rate=cb.policy_rate,

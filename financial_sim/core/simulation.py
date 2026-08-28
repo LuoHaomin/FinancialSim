@@ -315,8 +315,16 @@ class Simulation:
                     b.loans_to_firms = sum(
                         f.debt for f in firms if f.home_bank_id == b.id
                     )
-            # 房贷暂留 banks[0] (PR-3e 拆)
-            banks[0].loans_to_households = total_mortgages
+            # 房贷按 home_bank 分配 (PR-3e: HH 月供走 home_bank → 必须镜像分配)
+            for b in banks:
+                    b.loans_to_households = sum(
+                        h.mortgage_balance for h in households
+                        if h.home_bank_id == b.id
+                    )
+            # 残差给 banks[0] (浮点尾差)
+            banks[0].loans_to_households += total_mortgages - sum(
+                b.loans_to_households for b in banks
+            )
             # reserves 按 market_share 分配 (残差 banks[0] 吸收)
             for b in banks:
                 b.reserves = total_reserves * b.market_share
