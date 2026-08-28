@@ -214,6 +214,9 @@ def _pay_wages(state: SimulationState) -> None:
     规模 = monthly_sales * working_capital_factor, 受存款上限约束, 不足部分借.
     这让 firm.debt 与产出挂钩 → 贷款利息随 GDP 顺周期 → 银行资本顺周期.
 
+    Phase 3.5 PR-3a: 多银行真拆分 — 工资流按 firm/HH 的 home_bank_id 镜像到
+    具体银行 (而非全走主银行). 单银行 (n_banks=1) 维持主银行语义快路径.
+
     SFC (双侧镜像, 行内对冲零净额):
       firm.deposits  ↑WC      firm.debt ↑WC
       bank.deposits_from_firms ↑WC  bank.loans_to_firms ↑WC
@@ -228,6 +231,13 @@ def _pay_wages(state: SimulationState) -> None:
     by_employer: dict[str | None, list] = {}
     for h in employed_hh:
         by_employer.setdefault(h.employer_id, []).append(h)
+
+    # ── Phase 3.5 PR-3a: 多银行时按 home_bank_id 查表 ──
+    n_banks = len(state.banks)
+    multi_bank = n_banks > 1
+    bank_by_id: dict[str, object] = (
+        {b.id: b for b in state.banks} if multi_bank else {}
+    )
 
     # ── Phase 3.5: 工作资本按产出规模补充 (生产-债务挂钩) ──
     # 目标运营现金 = monthly_sales × factor; 不足时按缺口借新钱.
@@ -253,8 +263,13 @@ def _pay_wages(state: SimulationState) -> None:
             if borrow > 1e-9:
                 firm.debt += borrow
                 firm.deposits += borrow
-                bank.loans_to_firms += borrow
-                bank.deposits_from_firms += borrow
+                # 多银行: firm 借款入其 home_bank
+                f_bank = (
+                    bank_by_id[firm.home_bank_id] if multi_bank
+                    else bank
+                )
+                f_bank.loans_to_firms += borrow  # type: ignore[attr-defined]
+                f_bank.deposits_from_firms += borrow  # type: ignore[attr-defined]
 
     for firm in state.firms:
         group = by_employer.get(firm.id)
@@ -262,22 +277,31 @@ def _pay_wages(state: SimulationState) -> None:
             continue
         total_wages = len(group) * firm.wage_offered
 
+        # 多银行: firm 的 home_bank
+        f_bank = bank_by_id[firm.home_bank_id] if multi_bank else bank
+
         # 存款不足时向银行借款补足 (债务资本化, 不动资本)
         if firm.deposits < total_wages:
             shortfall = total_wages - firm.deposits
             firm.debt += shortfall
-            bank.loans_to_firms += shortfall
-            bank.deposits_from_firms += shortfall
+            f_bank.loans_to_firms += shortfall  # type: ignore[attr-defined]
+            f_bank.deposits_from_firms += shortfall  # type: ignore[attr-defined]
             firm.deposits += shortfall
 
         firm.deposits -= total_wages
-        bank.deposits_from_firms -= total_wages
-        bank.deposits_from_hh += total_wages
+        f_bank.deposits_from_firms -= total_wages  # type: ignore[attr-defined]
 
         wage_per_hh = total_wages / len(group)
         for h in group:
             h.income = wage_per_hh
             h.deposits += wage_per_hh
+            # 多银行: 工资按 HH 的 home_bank 镜像 (HH 可在不同银行开户)
+            if multi_bank:
+                h_bank = bank_by_id[h.home_bank_id]  # type: ignore[index]
+                h_bank.deposits_from_hh += wage_per_hh  # type: ignore[attr-defined]
+        # 单银行: 在循环外加总 (SFC 镜像, 一次到 banks[0])
+        if not multi_bank:
+            bank.deposits_from_hh += total_wages
 
 
 # ════════════════════════════════════════════════════════════

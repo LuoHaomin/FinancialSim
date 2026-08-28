@@ -256,13 +256,15 @@ class Simulation:
             banks.append(bank)
 
         # 主银行持有部门聚合的存贷款 (企业侧 = 各企业求和, 镜像逐位一致)
+        # 单银行模式: 主银行聚合所有 deposit/loan; 多银行模式: PR-2 init 段拆分.
         bank = banks[0]
-        bank.loans_to_firms = firm_deposits_actual
-        bank.loans_to_households = total_mortgages
-        bank.deposits_from_firms = firm_deposits_actual
-        bank.deposits_from_hh = hh_total_deposits
-        # 资本 = A − L (主银行单独平衡, 余下银行只放同业敞口)
-        bank.capital = bank.total_assets() - bank.total_liabilities()
+        if n_banks == 1:
+            bank.loans_to_firms = firm_deposits_actual
+            bank.loans_to_households = total_mortgages
+            bank.deposits_from_firms = firm_deposits_actual
+            bank.deposits_from_hh = hh_total_deposits
+            # 资本 = A − L (主银行单独平衡, 余下银行只放同业敞口)
+            bank.capital = bank.total_assets() - bank.total_liabilities()
 
         # ── Phase 3.5 PR-2: 多银行真拆分 init ──
         # n_banks=1 维持主银行语义 (旧路径, 优化)
@@ -277,30 +279,52 @@ class Simulation:
                 f.home_bank_id = banks[0].id
             banks[0].market_share = 1.0
         else:
-            # 按 HH 数量等概率分配, 然后按 deposit 加权求实际份额
+            # PR-2 init: 分配 home_bank_id + market_share + 同步拆 reserves/deposits/loans
+            # (PR-3d/e 不必再回头改 init)
             bank_ids = [b.id for b in banks]
             hh_assignments = b_rng.integers(0, n_banks, size=n_hh)
             for i, h in enumerate(households):
                 h.home_bank_id = bank_ids[int(hh_assignments[i])]
             for f in firms:
-                # firm 归属: 随机均匀 (无 deposit 信号)
                 f.home_bank_id = bank_ids[int(b_rng.integers(0, n_banks))]
-            # market_share = HH deposit-weighted (实际存款份额, 反映真实分配)
+            # market_share = HH deposit-weighted (反映真实存款分配)
             for b in banks:
                 total_dep_for_bank = sum(
                     h.deposits for h in households
                     if h.home_bank_id == b.id
                 )
                 b.market_share = total_dep_for_bank / max(1e-9, hh_total_deposits)
-            # 残差给 banks[0] (SFC 逐位相等)
             banks[0].market_share += 1.0 - sum(b.market_share for b in banks)
-            # 重分配: 多银行时初始聚合 BS 应与单银行一致 (PR-3 前的过渡态)
-            # banks[0] 仍持有全部初始 deposit/loan (单步走旧镜像路径), step.py
-            # 拆分在 PR-3 改造时再分配; PR-2 仅完成 home_bank_id 分配 + market_share
-            # 计算.
+
+            # 拆分 deposits + reserves per home_bank
+            # ⚠️ loan (firm loan + mortgage) 暂留 banks[0], PR-3d/e 改造
+            # _bank_cycle / _housing_cycle 时同步拆分. 否则 init 后
+            # firm debt 减少但 bank loan 未减 → 镜像不平衡.
+            for b in banks:
+                b.deposits_from_hh = sum(
+                    h.deposits for h in households
+                    if h.home_bank_id == b.id
+                )
+                b.deposits_from_firms = sum(
+                    f.deposits for f in firms
+                    if f.home_bank_id == b.id
+                )
+            # firm loan 暂留 banks[0] (PR-3d 拆); 房贷留 banks[0] (PR-3e)
+            banks[0].loans_to_firms = firm_deposits_actual
+            banks[0].loans_to_households = total_mortgages
+            # reserves 按 market_share 分配 (残差 banks[0] 吸收)
+            for b in banks:
+                b.reserves = total_reserves * b.market_share
+            banks[0].reserves += total_reserves - sum(
+                b.reserves for b in banks
+            )
+            # 每家银行资本 = A_i − L_i (自身 BS 自然平衡)
+            for b in banks:
+                b.capital = b.total_assets() - b.total_liabilities()
             logger.info(
                 f"PR-2 multi-bank init: n_banks={n_banks}, "
-                f"market_shares={[round(b.market_share, 3) for b in banks]}"
+                f"market_shares={[round(b.market_share, 3) for b in banks]}, "
+                f"bank_caps={[round(b.capital, 2) for b in banks]}"
             )
 
         # ── 同业网络 (Phase 2): claims/debt 双边同额, 聚合恒等式不变 ──
