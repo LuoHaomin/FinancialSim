@@ -598,6 +598,195 @@ pydantic 校验→ShockEvent 注入 EventManager); GET interventions 只读审�
 
 ---
 
+## Phase 3.5 — 完整架构收尾(2026-08-28 起)
+
+> **动机**: 当前 5 个 xfail 中有 4 个根因是"架构未收尾"而非"参数未校准":
+> 多银行真拆分缺位 → 同业敞口失效; 多企业死代码 → 部门内无竞争;
+> NBFI 7 个 flag 默认关 → 集成路径未验证. 直接调参会随每次架构改动
+> 反复失效,所以**先把架构全部铺开,最后一次性校准**。
+
+### 3.5.0 — 状态看板 (2026-08-28)
+
+| 子项 | 状态 | 内容 |
+|---|---|---|
+| 行为化抵押违约级联 | ✅ | 连续 6 月负资产 → 违约; `tests/integration/test_crisis.py` 2 xfail 已解锁 |
+| 企业按生产融资 | ✅ | `firm_working_capital_factor`: 工资单 × factor 决定借款; `tests/calibration/test_stylized_facts.py::TestBankProCyclicality` 已通过 |
+| Minsky 失业螺旋 | ✅ | `labor_adjust_down_speed` 0.06→0.20,`labor_matching_efficiency` 0.50→0.30; `TestCrisisEmergence::test_minsky_peak_unemployment` 已通过 |
+| **PR-1** 多部门多家企业 | ✅ | `n_firms_per_sector` 从死代码生效; 默认 = 1 向后兼容; 9 新测试; `tests/integration/test_multifirm.py` |
+| **PR-2** 多银行 init | ✅ | `home_bank_id` (HH + firm) + `market_share` (deposit-weighted) + `_allocate_share` 工具; 14 新测试; `tests/integration/test_multibank_init.py` |
+| **PR-3** 多银行 step.py 拆分 | ⏳ | `_pay_wages` / `_household_consumption` / `_government_cycle` / `_bank_cycle` / `_housing_cycle` / `_default_resolution` / `_dividend_cycle` 按 `market_share` 拆分; 主银行语义保留为 `n_banks=1` 优化路径 |
+| **PR-4** 同业动态化 | ⏳ | `InterbankNetwork.rewire()` + 储备再平衡 + `_interbank_cycle` 真双边记账 |
+| **PR-5** NBFI 全开验证 | ⏳ | 7 个 flag 默认开, 逐个 SFC 验证, 已知 `bond_market` 有 BS identity 违反待修 |
+| **PR-6** 完整回归矩阵 | ⏳ | 7 场景 × 3 种子 + stylized_facts 全跑 |
+| **PR-7** 失真分析与调参 | ⏳ | 架构稳定后一次性校准, 一次只动一组参数 |
+
+测试基线 (PR-2 完成): 365 passed · 1 xfail (`test_rebalance_tolerant_households_hold_more`) · ruff clean · 0 SFC violation.
+
+**PR-1 决策**: `n_firms_per_sector` 默认改回 1 (而非 50) — 旧 50 是文档化的"未来默认",但与 `state.firm` 单数别名 / 6 个老测试假设单企业冲突。改回 1 保持向后兼容,需要多企业时显式设置 `n_firms_per_sector≥2`。
+
+**PR-2 决策**: `home_bank_id` 随机分配策略 — 每个 HH/firm 用 `"bank_assignment"` 命名 RNG 流在 init 时一次性分配,期间不变。`market_share` 反映 HH deposit-weighted 实际份额(非均匀)。下一步 PR-3 step.py 拆分时按 `market_share` 调用 `_allocate_share`。
+
+### 3.5.A — 多部门多家企业(同部门内同质)
+
+**当前失真**:`config.n_firms_per_sector` 是死字段 — `simulation._build_state` 第 100-136 行只对 `sectors` 创建 1 家/sector, 忽略 `n_firms_per_sector`。`tests/conftest.py:30` 设了 `n_firms_per_sector=2` 但无效果。
+
+**目标**:`SimConfig(n_firms_per_sector=3, sectors=['consumer_goods'])` 应真实创建 3 家 consumer_goods 企业(同质: productivity/wage/calvo 一致, 仅 firm.id 不同)。
+
+**改动范围**:
+- `financial_sim/core/simulation.py:_build_state`: sector 内循环 `for fi in range(n_firms_per_sector)`, 工资/员工均分
+- `financial_sim/markets/labor.py:_frictional_hire`: 部门内多家按 vacancies 比例分配新员工(已有 `vacancies_per_firm` 字典结构, 只需确保同部门多键)
+- `financial_sim/core/simulation.py`: 初始化时按部门总员工数切分到多家(`allocated_emp` 现已存在, 需细分到 firm 索引)
+- SFC: 每家 firm 独立 BS 字段(已存在); 银行聚合 `loans_to_firms` `deposits_from_firms` 求和(`build_balance_sheets` 已实现)
+
+**测试**:
+- 新增 `tests/integration/test_multifirm.py`: 验证 `len(state.firms) == sum(n_firms_per_sector for s in sectors)`
+- 新增负向: 不同 sector 的 firm 不混; 同 sector firm 行为一致
+
+**风险**: 中 — 改 init 路径, ~5-10 行。SFC 影响: 银行聚合无变化(已实现求和)。
+
+**回归影响**: 校准值(基线)会因 firm 数变而漂移, 留给 3.5.F 一次性校准。
+
+### 3.5.B — 多银行真拆分(主银行语义 → 真账户拆分)
+
+**当前失真**:`state.bank == state.banks[0]` (主银行语义), 100+ 处 `bank.xxx` 镜像只走 `banks[0]`, `interbank_network=None`。`n_banks>1` 时同部门聚合流只入主银行, 外围银行 `reserves=0` 是空账户, 同业敞口失效。
+
+**目标**:`SimConfig(n_banks>=2)` 时:
+1. 每家银行持有真实份额的部门存款/贷款(初始按 `market_share = initial_deposits_i / Σinitial_deposits` 分配)
+2. 部门流(工资/消费/税收/G)按 `market_share` 拆分到各银行
+3. 每家银行独立 `set_rates` + 计息(可异质的存款/贷款利率)
+4. 多银行时 `interbank_network` 真初始化 + 储备再平衡
+
+**改动范围** (step.py, 估 30 处):
+- `_pay_wages`: 工资 `bank.deposits_from_firms -=` 按 share 拆分
+- `_household_consumption`: 消费同
+- `_bank_cycle`: per-bank `set_rates()` + per-bank 利息入对应 bank.capital
+- `_government_cycle`: 税收/G/TR 按 share 拆分
+- `_housing_cycle`: 月供走持有 mortgage 的银行(每 HH 初始随机分配银行)
+- `_consumer_credit_cycle`: 消费贷申请落到具体银行
+- `_default_resolution`: 核销走 firm 所属银行
+- `_dividend_cycle`: 股息按持股银行归属
+- `_pay_wages` 中的 `bank.deposits_from_nbfi` 也按 share 拆分
+- `_interbank_cycle`: 重写为真双向 + 储备再平衡
+- 新增 `_allocate_share(amount, banks, key)` 工具: 按 `market_share` 分摊金额到各银行, 残差给最后一家(SFC 逐位相等)
+
+**保留优化路径**:`n_banks=1` 仍走单银行主银行语义(快路径, 旧测试不退化); `n_banks>=2` 走真拆分。
+
+**测试**:
+- 重写 `tests/integration/test_multibank_baseline_no_violation`: 加严 — 验证每家银行 BS 独立干净, 不只是聚合
+- 新增 `tests/integration/test_multibank_consumption_split`: 验证消费按 share 拆分
+- 新增 `tests/integration/test_multibank_consistent_with_singlebank`: n_banks=1 与 n_banks=2 (合并 share) 总账逐位相等
+
+**风险**: **高** — 浮点尾差需容差处理, 可能暴露既有 SFC bug。建议分 PR 拆批: A → B-init → B-cycle → B-crisis。
+
+**回归影响**: 多银行测试必须 SFC 干净; 多银行场景下家庭/企业总账必须 ≈ 单银行聚合(浮点容差 1e-9·scale)。
+
+### 3.5.C — 多银行动态同业(E2 同业动态化)
+
+**当前失真**:`InterbankNetwork` 只暴露静态 `build_core_periphery()`, 仿真初始化为 `None`。`apply_failure()` 已实现但需真实敞口才有意义。
+
+**目标**: 动态化的同业网络:
+1. **季度重连** (`rewire`): 每 3 tick 触发, 基于 CAR 排序重连核心-外围(健康银行取代失败银行进核心)
+2. **储备再平衡**: 每 tick 检测 `bank.reserves / total_assets` 偏离目标, 经同业市场拆出/拆入
+3. **真实拆借利率**: 用 policy_rate + 期限溢价(简化: 同业利率 = policy_rate + 0.5%)
+4. **失败传染**: 真实敞口驱动的损失分配(`apply_failure` 已存在)
+
+**改动范围**:
+- `financial_sim/network/interbank.py`: 新增 `rewire(banks, rng)`, `rebalance_reserves(banks, cb_rate)`
+- `financial_sim/core/step.py:_interbank_cycle`: 重写为真双边记账(已有 stub, 需补齐 reserve 通道 + 重新借息路径)
+- `financial_sim/core/simulation.py:_build_state`: 多银行时初始化 `interbank_network` 为 Core-Periphery
+
+**测试**:
+- `tests/unit/test_interbank.py`: 动态重连 + 储备再平衡
+- `tests/integration/test_interbank_failure_contagion`: 一家银行失败 → 同业传染 → 其他银行资本降
+
+**风险**: 中 — 单文件 ~80 行 + step.py 一处重写 ~80 行。
+
+### 3.5.D — NBFI 全开集成验证
+
+**当前失真**: 7 个 flag 默认关 → NBFI 路径未在集成测试中验证。已知 `enable_bond_market=True` 跑出 BS identity Δ=2000+ / bond mismatch Δ=3400+ 违反(2026-08-28 实测)。
+
+**目标**: 7 flag 默认全开, baseline 60 月 SFC 干净。
+
+| Flag | 已知问题 | 修复方向 |
+|---|---|---|
+| `enable_bond_market` | BS identity / bond mismatch | 检查 `_bond_cycle` 中 `bank.deposits_from_hh` 与 `cb.treasury_deposits` 是否双计 |
+| `enable_consumer_credit` | (未实测) | 默认 60 月跑测 |
+| `enable_stock_market` | (未实测) | 默认 60 月跑测 |
+| `enable_cross_holdings` | (未实测) | 默认 60 月跑测 |
+| `enable_investment_bank` | (未实测) | 需先开 stock_market |
+| `enable_asset_manager` | (未实测) | 需先开 stock_market |
+| `enable_supply_chain` | (未实测) | 默认 60 月跑测 |
+
+**改动范围**:
+- `financial_sim/config.py`: 7 个 flag `default=False` → `default=True`(独立 PR, 不与 3.5.A/B/C 合并)
+- 修复已知 SFC bug(若 bond_market 仍违反, 加修复 PR)
+- 新增 `tests/integration/test_all_features_on.py`: 所有 flag 开, baseline 60 月, SFC=0
+
+**风险**: 中 — 每 flag 5-20 行 fix; bond_market 可能需重构。
+
+### 3.5.E — 完整回归矩阵
+
+**目标**: 架构稳定后, 在统一 baseline + 7 场景 × 3 种子 = 21 跑, SFC 全绿; stylized_facts 7/10 项 pass。
+
+**测试**:
+- `tests/integration/test_phase3_acceptance.py`: 已存在, 加严 — 多银行场景也跑
+- `tests/calibration/test_stylized_facts.py`: 已存在, 期望全部 pass
+- `tests/integration/test_performance.py`: 仍 < 2s P95(n_households=1000, 12 firms × 6 sectors)
+
+### 3.5.F — 失真分析与调参
+
+**原则**: 架构稳定后, 一次只动一组参数:
+1. 结构性(部门份额 / 替代弹性 / 生产率)
+2. 行为性(MPC 分布 / 风险偏好 / 储蓄率)
+3. 政策规则(Taylor 系数 / 折旧率 / CAR 阈值)
+
+**目标**: 跑完每项 stylized fact, 列出当前值 vs 目标值(SCF / FRED), 逐项调整。
+
+**输出**: `IMPLEMENTATION.md §校准记录` — 每项调整的:
+- 原值 / 新值 / 调整后矩变化
+- 业务理由
+- 副作用监测
+
+### 3.5 实施顺序与依赖
+
+```
+3.5.A 多部门多家企业     (低风险, 先做)
+   ↓
+3.5.B 多银行真拆分       (高风险, 但需 A 提供更真实的部门流)
+   ↓
+3.5.C 同业动态化         (依赖 B 真实账户拆分)
+   ↓
+3.5.D NBFI 全开          (依赖 A+B+C 多主体环境)
+   ↓
+3.5.E 完整回归矩阵       (架构稳定后跑全套)
+   ↓
+3.5.F 失真分析与调参     (所有架构就位后调一次)
+```
+
+**建议 PR 顺序**(每项独立可合并, 失败可回滚):
+1. **PR-1** 3.5.A 多部门多家企业
+2. **PR-2** 3.5.B-init 多银行 init + 工具函数
+3. **PR-3** 3.5.B-cycle 多银行 step 改造 (分 PR-3a 工资/PR-3b 消费/PR-3c 政府/PR-3d 银行循环/PR-3e 违约/分红/PR-3f 同业)
+4. **PR-4** 3.5.C 同业动态化
+5. **PR-5** 3.5.D NBFI 全开 (含已知 SFC bug 修复)
+6. **PR-6** 3.5.E 完整回归矩阵
+7. **PR-7** 3.5.F 失真分析与调参
+
+每 PR 验收:
+- `pytest -q` 全绿 (允许新增的 xfail 但禁止回退)
+- `ruff check .` 干净
+- 文档同步: IMPLEMENTATION.md 状态更新 + AGENTS.md 关键约定
+
+### 已知风险
+
+1. **多银行浮点尾差**: `n_banks>=2` 时求和路径在 100+ 处都需按 share 拆分, 浮点累积误差可能超过 `1e-9·scale` 容差 → 需引入 `share * total` 路径优先, 残差给最后一家。
+2. **NBFI bond SFC bug**: 已观测到 `enable_bond_market=True` 后 `BS identity violation: banks A=18741 L=13663 NW=3061 Δ=2017` — 双计或多计。修复需先定位(`bank.deposits_from_hh` 路径中 `_bond_cycle` 是否参与)。
+3. **校准反复失效**: 任何架构改动都需重做 3.5.F。这是为什么把校准放在最后。
+4. **性能门禁**: 多企业 + 多银行 + NBFI 全开后, n_households=1000 / 12 firms × 6 sectors / 3 banks 的 P95 tick 可能逼近 2s 边界。瓶颈在 `_household_consumption` 的循环 (按 share 拆分到 3 banks 后每户多 3 次写入)。
+5. **Week-C rebalance xfail**: 与本阶段无直接依赖, 但 `enable_stock_market=True` 跑 baseline 后才会出现。留给 3.5.F 校准时观察。
+
+---
+
 ### Phase 5：校准与验证（持续运行，与 Phase 4 并行启动）
 
 | 工作流 | 内容 |

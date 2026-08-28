@@ -35,6 +35,53 @@ def _cfg(state: SimulationState, name: str, default: float | int | bool) -> floa
     return default if value is None else value
 
 
+def _allocate_share(
+    amount: float,
+    banks: list,
+    share_attr: str = "market_share",
+) -> dict[str, float]:
+    """Phase 3.5 PR-2: 按份额拆分到多家银行 (SFC 镜像, 残差给最后一家).
+
+    单银行 (n_banks=1) 时快速返回全量给 banks[0].
+
+    Parameters
+    ----------
+    amount : float
+        待拆分总额. 负值也支持 (退款/扣款).
+    banks : list[CommercialBank]
+        银行列表. 顺序与 share_attr 一致; Σ share 应 ≈ 1.0.
+    share_attr : str
+        取每家银行该字段作为份额权重 (默认 'market_share').
+
+    Returns
+    -------
+    dict[str, float]
+        {bank.id: allocated_amount}. Σ == amount (浮点容差 1e-9 × scale).
+
+    Notes
+    -----
+    浮点卫生 — 残差给 banks[-1], 保证 Σ 严格逐位相等. 单银行时直接返回
+    全量, 不引入浮点误差.
+    """
+    if not banks:
+        return {}
+    if len(banks) == 1:
+        return {banks[0].id: amount}
+    if amount == 0:
+        return {b.id: 0.0 for b in banks}
+    out: dict[str, float] = {}
+    distributed = 0.0
+    last_bank = banks[-1]
+    for b in banks[:-1]:
+        share = max(0.0, getattr(b, share_attr, 0.0))
+        v = amount * share
+        out[b.id] = v
+        distributed += v
+    # 残差给最后一家 (SFC 逐位相等)
+    out[last_bank.id] = amount - distributed
+    return out
+
+
 def monthly_tick(
     state: SimulationState,
     goods_market: GoodsMarket | None = None,
@@ -161,7 +208,16 @@ def _effective_income_tax_rate(state: SimulationState, base: float) -> float:
 # 3. 工资支付 (Phase 3: 按雇主归属逐企业支付)
 # ════════════════════════════════════════════════════════════
 def _pay_wages(state: SimulationState) -> None:
-    """各企业给自己的员工发工资, 钱从 firm.deposits 转到 hh.deposits."""
+    """各企业给自己的员工发工资, 钱从 firm.deposits 转到 hh.deposits.
+
+    Phase 3.5 行为化: 在发薪前, 先按生产规模补足工作资本缺口 (working capital).
+    规模 = monthly_sales * working_capital_factor, 受存款上限约束, 不足部分借.
+    这让 firm.debt 与产出挂钩 → 贷款利息随 GDP 顺周期 → 银行资本顺周期.
+
+    SFC (双侧镜像, 行内对冲零净额):
+      firm.deposits  ↑WC      firm.debt ↑WC
+      bank.deposits_from_firms ↑WC  bank.loans_to_firms ↑WC
+    """
     bank = state.bank
     assert bank is not None
 
@@ -172,6 +228,33 @@ def _pay_wages(state: SimulationState) -> None:
     by_employer: dict[str | None, list] = {}
     for h in employed_hh:
         by_employer.setdefault(h.employer_id, []).append(h)
+
+    # ── Phase 3.5: 工作资本按产出规模补充 (生产-债务挂钩) ──
+    # 目标运营现金 = monthly_sales × factor; 不足时按缺口借新钱.
+    # 在 GDP 上行期 (sales↑) → 借更多 → 利息支出↑ → 银行利息收入↑;
+    # GDP 下行期 (sales↓) → 还本压力 (按 repayment_speed 缩) → 银行利息↓
+    # → 银行资本自然顺周期, 无需单独 NPL 通道.
+    wc_factor = float(_cfg(state, "firm_working_capital_factor", 0.20))
+    max_growth = float(_cfg(state, "firm_max_loan_growth_factor", 0.20))
+    for firm in state.firms:
+        if firm.is_bankrupt or wc_factor <= 0:
+            continue
+        # 工作资本目标 = 当月工资单 × factor — 与就业规模直接挂钩,
+        # 经济上行就业↑→ 工资单↑ → 借款↑ → 利息↑ → 银行资本顺周期.
+        # 失业期就业↓ → 工资单↓ → 还本缩债 → 银行利息↓.
+        labor_cost = firm.wage_offered * max(1, firm.employees)
+        target_wc = wc_factor * labor_cost
+        gap = max(0.0, target_wc - firm.deposits)
+        if gap > 1e-9:
+            # 借款上限: 单月新增借款 ≤ max(20% × 当前债务, 1 月工资单) — 二者取大,
+            # 保证即使 debt=0 时也能启动借款 (历史 bug: 初始 debt=0 时上限=0 死锁).
+            max_new_debt = max(firm.debt * max_growth, labor_cost * max_growth)
+            borrow = min(gap, max_new_debt)
+            if borrow > 1e-9:
+                firm.debt += borrow
+                firm.deposits += borrow
+                bank.loans_to_firms += borrow
+                bank.deposits_from_firms += borrow
 
     for firm in state.firms:
         group = by_employer.get(firm.id)
@@ -1924,10 +2007,13 @@ def _housing_cycle(state: SimulationState) -> None:
 
 
 def _mortgage_default_check(state: SimulationState) -> None:
-    """Phase 2: 房贷违约检查.
+    """Phase 3.5 行为化房贷违约检查.
 
-    触发: housing_value < mortgage_balance × default_ltv_threshold
-          (即 LTV > 110% → 负资产 → 失业 + 高 LTV 双重打击)
+    触发 (任一即可):
+      A. 经典 (Phase 2): underwater AND (断供≥N 月 OR 长期失业>6 月)
+      B. 行为化 (Phase 3.5): 连续 K 个月 underwater → 强制违约 (negative-equity trap)
+         即使家庭存款仍能月供, 负资产心理压力 + 理性再配置 (理性违约模型) 也会触发.
+         K 默认 6 月 → 慢但确定性; 房价崩 50%+ 后 ~3-4 月内出现首批违约级联.
 
     处置: 部分回收 (非凭空销毁) — 历史 bug: 原版直接 `write_off_mortgage`
     全额 + `h.housing_units = 0`, 房子消失了, 银行承担 100% 损失. 现改为:
@@ -1937,6 +2023,8 @@ def _mortgage_default_check(state: SimulationState) -> None:
         2. 房屋所有权转给银行 (从家庭搬到 REO 簿), 通过 housing_units 同步减
            家庭侧 + 增 bank.reo_properties (数量守恒)
         3. 房贷余额双边归零: bank.loans_to_hh 减 M / h.mortgage 减 M (SFC 同步)
+
+    SFC 注记: 行为化触发不引入新账户, 只增加 months_underwater 计数.
     """
     housing = state.housing_market
     if housing is None:
@@ -1947,6 +2035,9 @@ def _mortgage_default_check(state: SimulationState) -> None:
         return
 
     missed_threshold = int(_cfg(state, "mortgage_missed_payment_limit", 3))
+    underwater_months_threshold = int(
+        _cfg(state, "mortgage_underwater_months_threshold", 6)
+    )
     liquidation_discount = float(
         _cfg(state, "mortgage_liquidation_discount", 0.70)
     )
@@ -1957,9 +2048,21 @@ def _mortgage_default_check(state: SimulationState) -> None:
         house_value = h.housing_units * housing.price
         ltv = h.mortgage_balance / house_value if house_value > 0 else float("inf")
         underwater = ltv > housing.default_ltv_threshold
+
+        # 维护 underwater 计数 (仅在房贷户中累计)
+        if underwater:
+            h.months_underwater += 1
+        else:
+            h.months_underwater = 0
+
         payment_stress = h.mortgage_missed_payments >= missed_threshold
         long_unemployed = (not h.employed) and h.unemployment_duration > 6
-        if not (underwater and (payment_stress or long_unemployed)):
+        # Phase 3.5 行为化触发: 连续 K 月负资产 → 强制违约
+        # (即使存款仍充足, 理性违约策略: 抛弃钥匙, 走人)
+        behavioral_default = h.months_underwater >= underwater_months_threshold
+
+        triggered = (underwater and (payment_stress or long_unemployed)) or behavioral_default
+        if not triggered:
             continue
 
         mortgage = h.mortgage_balance
@@ -1981,10 +2084,12 @@ def _mortgage_default_check(state: SimulationState) -> None:
         units = h.housing_units
         h.mortgage_balance = 0.0
         h.housing_units = 0
+        h.months_underwater = 0
         bank.reo_properties += units
 
         logger.info(
             f"  Mortgage default: HH {h.id}, LTV={ltv:.2f}, "
+            f"months_underwater={h.months_underwater}, "
             f"mortgage={mortgage:.2f}, recovery={recovery_value:.2f}, "
             f"loss={loss:.2f}"
         )

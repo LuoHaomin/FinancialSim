@@ -84,56 +84,74 @@ class Simulation:
             taylor_output_coeff=config.taylor_output_coeff,
         )
 
-        # ── 企业 (贷款融资的营运资金; Phase 3 Week A 多部门列表化) ──
-        # 每部门一家起步 (统计意义的多家异质性留 Week A 后续).
-        # 营运资金与初始就业按部门劳动份额分配, 残差记在第一家 (消费部门),
-        # 保证 Σfirm.debt 与旧单企业口径完全一致 (银行侧镜像逐位相等).
+        # ── 企业 (贷款融资的营运资金; Phase 3.5 PR-1: 多部门多家企业) ──
+        # 每个 sector 创建 n_firms_per_sector 家同质企业 (Phase 3.5: 同部门内
+        # 同质; within-sector 异质性留 Phase 4+).
+        # 营运资金与初始就业按部门劳动份额 × 每家等分, 残差记在每部门最后一家
+        # (保证 Σfirm.debt 严格 == 旧单企业口径; 银行侧镜像逐位相等).
         wage = 1.0
         initial_firm_deposits = float(n_hh) * wage * 2  # 首月工资 + 缓冲
         labor_shares = config.normalized_labor_shares()
         sectors = list(getattr(config, "sectors", ["consumer_goods"])) or [
             "consumer_goods"
         ]
+        n_per_sector = max(1, int(getattr(config, "n_firms_per_sector", 50)))
         firms: list[Firm] = []
         allocated_dep = 0.0
         allocated_emp = 0
         for si, sector in enumerate(sectors):
-            share = labor_shares.get(sector, 1.0 / len(sectors))
+            sector_share = labor_shares.get(sector, 1.0 / len(sectors))
+            sector_dep = initial_firm_deposits * sector_share
+            sector_emp_total = int(round(n_hh * sector_share))
             last_sector = si == len(sectors) - 1
-            dep = (
-                initial_firm_deposits - allocated_dep
-                if last_sector
-                else round(initial_firm_deposits * share, 10)
-            )
-            emp = (
-                n_hh - allocated_emp if last_sector
-                else int(round(n_hh * share))
-            )
-            firms.append(Firm(
-                id=f"firm_{si}_{sector}",
-                sector=sector,
-                productivity=sector_param(sector, "productivity", 1.0),
-                price=sector_param(sector, "price", 1.0),
-                wage_offered=wage,
-                employees=max(0, emp),
-                baseline_employees=max(0, emp),
-                deposits=dep,
-                debt=dep,
-                depreciation_rate=config.depreciation_rate,
-                investment_sensitivity=config.investment_sensitivity,
-                calvo_price_prob=config.calvo_price_prob,
-                calvo_markup_target=config.calvo_markup_target,
-                production_function=getattr(
-                    config, "production_function", "linear"
-                ),
-                sigma_elasticity=float(getattr(config, "sigma_elasticity", 0.5)),
-                alpha_capital=float(getattr(config, "alpha_capital", 0.3)),
-                default_equity_threshold=getattr(
-                    config, "firm_default_equity_threshold", 0.0
-                ),
-            ))
-            allocated_dep += dep
-            allocated_emp += max(0, emp)
+            for fi in range(n_per_sector):
+                last_in_sector = fi == n_per_sector - 1
+                # dep 分配: 每部门最后一家吸收残差 (SFC 逐位相等)
+                if last_sector and last_in_sector:
+                    dep = initial_firm_deposits - allocated_dep
+                    emp = n_hh - allocated_emp
+                elif last_in_sector:
+                    # 同部门最后一家: 吸收部门内残差
+                    expected_dep = sector_dep
+                    actual_dep_so_far = sum(
+                        f.deposits for f in firms
+                        if f.sector == sector
+                    )
+                    dep = expected_dep - actual_dep_so_far
+                    expected_emp = sector_emp_total
+                    actual_emp_so_far = sum(
+                        f.employees for f in firms
+                        if f.sector == sector
+                    )
+                    emp = expected_emp - actual_emp_so_far
+                else:
+                    dep = round(sector_dep / n_per_sector, 10)
+                    emp = int(round(sector_emp_total / n_per_sector))
+                firms.append(Firm(
+                    id=f"firm_{si}_{fi}_{sector}",
+                    sector=sector,
+                    productivity=sector_param(sector, "productivity", 1.0),
+                    price=sector_param(sector, "price", 1.0),
+                    wage_offered=wage,
+                    employees=max(0, emp),
+                    baseline_employees=max(0, emp),
+                    deposits=dep,
+                    debt=dep,
+                    depreciation_rate=config.depreciation_rate,
+                    investment_sensitivity=config.investment_sensitivity,
+                    calvo_price_prob=config.calvo_price_prob,
+                    calvo_markup_target=config.calvo_markup_target,
+                    production_function=getattr(
+                        config, "production_function", "linear"
+                    ),
+                    sigma_elasticity=float(getattr(config, "sigma_elasticity", 0.5)),
+                    alpha_capital=float(getattr(config, "alpha_capital", 0.3)),
+                    default_equity_threshold=getattr(
+                        config, "firm_default_equity_threshold", 0.0
+                    ),
+                ))
+                allocated_dep += dep
+                allocated_emp += max(0, emp)
         firm = firms[0]
 
         # ── 家庭 (异质: 储蓄率/MPC 截断正态; 工资对数正态) ──
@@ -245,6 +263,45 @@ class Simulation:
         bank.deposits_from_hh = hh_total_deposits
         # 资本 = A − L (主银行单独平衡, 余下银行只放同业敞口)
         bank.capital = bank.total_assets() - bank.total_liabilities()
+
+        # ── Phase 3.5 PR-2: 多银行真拆分 init ──
+        # n_banks=1 维持主银行语义 (旧路径, 优化)
+        # n_banks>=2: 每家 HH/firm 随机选 home_bank; market_share 由
+        #   该银行的实际存款份额决定 (HH deposits 比例); 用于 PR-3 step 拆分.
+        b_rng = self.rng.stream("bank_assignment")
+        if n_banks == 1:
+            # 全部走 banks[0]
+            for h in households:
+                h.home_bank_id = banks[0].id
+            for f in firms:
+                f.home_bank_id = banks[0].id
+            banks[0].market_share = 1.0
+        else:
+            # 按 HH 数量等概率分配, 然后按 deposit 加权求实际份额
+            bank_ids = [b.id for b in banks]
+            hh_assignments = b_rng.integers(0, n_banks, size=n_hh)
+            for i, h in enumerate(households):
+                h.home_bank_id = bank_ids[int(hh_assignments[i])]
+            for f in firms:
+                # firm 归属: 随机均匀 (无 deposit 信号)
+                f.home_bank_id = bank_ids[int(b_rng.integers(0, n_banks))]
+            # market_share = HH deposit-weighted (实际存款份额, 反映真实分配)
+            for b in banks:
+                total_dep_for_bank = sum(
+                    h.deposits for h in households
+                    if h.home_bank_id == b.id
+                )
+                b.market_share = total_dep_for_bank / max(1e-9, hh_total_deposits)
+            # 残差给 banks[0] (SFC 逐位相等)
+            banks[0].market_share += 1.0 - sum(b.market_share for b in banks)
+            # 重分配: 多银行时初始聚合 BS 应与单银行一致 (PR-3 前的过渡态)
+            # banks[0] 仍持有全部初始 deposit/loan (单步走旧镜像路径), step.py
+            # 拆分在 PR-3 改造时再分配; PR-2 仅完成 home_bank_id 分配 + market_share
+            # 计算.
+            logger.info(
+                f"PR-2 multi-bank init: n_banks={n_banks}, "
+                f"market_shares={[round(b.market_share, 3) for b in banks]}"
+            )
 
         # ── 同业网络 (Phase 2): claims/debt 双边同额, 聚合恒等式不变 ──
         # ⚠️ claims/debt 是**银行间**内部资产/负债, 不会改变聚合 BS 恒等式,

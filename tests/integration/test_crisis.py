@@ -43,21 +43,13 @@ class TestCrisisEmergence:
         sim = _run_crisis()
         assert sim.state.housing_price < 120.0 * 0.5
 
-    @pytest.mark.xfail(
-        reason="校准 2026-08 (IOR + 还本摊还 + 成本锚) 消除了银行的机械性"
-               "利息放血, 银行失败需依赖行为性违约级联传导 (Phase 3.5 遗留项)",
-        strict=False,
-    )
     def test_bank_failures_occur_and_are_recorded(self):
+        """Phase 3.5 行为化违约级联 → 银行失败被记录."""
         sim = _run_crisis(60)
         assert len(sim.state.failed_banks) >= 1
 
-    @pytest.mark.xfail(
-        reason="校准 2026-08 后危机场景实现房价崩盘但家庭资产负债表仍稳健,"
-               "抵押违约级联待行为化 (Phase 3.5 遗留项)",
-        strict=False,
-    )
     def test_mortgage_defaults_generated(self):
+        """Phase 3.5 行为化违约触发: 连续 N 月负资产 → 抵押违约级联."""
         sim = _run_crisis()
         primary = sim.state.banks[0]
         assert primary.npl_writes_off_cumulative > 0

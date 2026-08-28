@@ -22,6 +22,7 @@ class Firm:
 
     id: str
     sector: str
+    home_bank_id: str | None = None  # Phase 3.5 PR-2: 贷款/存款所在银行 (多银行时随机分配)
 
     # ── 生产 ──
     capital: float = 100.0

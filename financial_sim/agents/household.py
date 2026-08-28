@@ -34,6 +34,7 @@ class Household:
     id: str
     sector: str | None = None
     employer_id: str | None = None  # 雇主 firm.id (Phase 3 多企业)
+    home_bank_id: str | None = None  # Phase 3.5 PR-2: 存款所在的银行 (多银行时随机分配)
 
     # ── 就业 ──
     wage: float = 0.0
@@ -61,6 +62,7 @@ class Household:
     mortgage_rate: float = 0.0             # 房贷利率 (锁定)
     rental_income: float = 0.0             # 当月租金收入
     mortgage_missed_payments: int = 0      # 连续错过月供次数 (断供压力计)
+    months_underwater: int = 0             # 连续负资产月数 (Phase 3.5 行为化违约通道)
 
     # ── Phase 3 前置: 消费信贷 (P0-a) + 私人持债 (P0-b) ──
     consumer_loan: float = 0.0             # 消费贷余额

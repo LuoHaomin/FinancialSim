@@ -18,10 +18,16 @@ from dataclasses import dataclass
 
 @dataclass
 class CommercialBank:
-    """商业银行 agent (Phase 2: 多家 + 抵押贷款 + 同业)."""
+    """商业银行 agent (Phase 2: 多家 + 抵押贷款 + 同业).
+
+    Phase 3.5 PR-2 新增:
+    - market_share: 初始按 deposit 比例分配的部门流份额, 期不变
+                   (n_banks=1 时为 1.0; n_banks>=2 时按 initial_deposits 比例)
+    """
 
     id: str = "bank_1"
     tier: int = 1                        # 1=核心, 2=外围 (Phase 2 网络结构)
+    market_share: float = 1.0            # Phase 3.5 PR-2: 部门聚合流份额 (n_banks>=2 时 < 1.0)
 
     # ── 资产 ──
     reserves: float = 0.0

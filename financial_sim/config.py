@@ -56,7 +56,7 @@ class SimConfig(BaseModel):
 
     # Population
     n_households: int = Field(default=1000, ge=1)
-    n_firms_per_sector: int = Field(default=50, ge=1)
+    n_firms_per_sector: int = Field(default=1, ge=1)  # Phase 3.5 PR-1: 默认 1 (向后兼容旧单企业测试); 多企业场景需显式 ≥ 2
     sectors: list[str] = Field(default_factory=lambda: ["consumer_goods"])
     # n_banks 定义在 "Multi-bank (Phase 2)" 分组, 见下文 (此处不重复声明)
 
@@ -118,6 +118,8 @@ class SimConfig(BaseModel):
     productivity_growth_monthly: float = 0.0015   # 月度 TFP 增长 (~1.8%/年)
     labor_wage_productivity_indexation: bool = True  # 工资方程是否指数化生产率趋势
     firm_loan_repayment_speed: float = 0.30  # 营运资本贷款月度还本比例 (超工资单盈余部分)
+    firm_working_capital_factor: float = 0.20  # Phase 3.5 工作资本目标 = monthly_sales × factor (产出-债务挂钩)
+    firm_max_loan_growth_factor: float = 0.20  # 单月借款增长率上限 (顺周期节流)
 
     def normalized_labor_shares(self) -> dict[str, float]:
         """各部门劳动力配置比例 (SECTOR_DEFAULTS 劳动份额归一化)."""
@@ -250,6 +252,7 @@ class SimConfig(BaseModel):
     housing_initial_ltv: float = 0.70         # 初始抵押组合的平均 LTV
     housing_mortgage_rate_spread: float = 0.02  # 抵押贷款利率溢价
     housing_default_ltv_threshold: float = 1.10  # 房贷余额 > 此 LTV → 违约
+    mortgage_underwater_months_threshold: int = 6  # Phase 3.5 行为化违约: 连续 K 月负资产 → 强制违约 (理性违约模型)
 
     # ── Multi-bank (Phase 2) ──
     n_banks: int = Field(default=1, ge=1)   # 银行数 (默认 1 保持 backward-compat)
