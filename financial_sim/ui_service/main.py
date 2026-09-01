@@ -8,19 +8,27 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from financial_sim.scenarios import load_scenario
+from financial_sim.scenarios import list_scenarios, load_scenario
 from financial_sim.simulation.events import PRESET_SHOCKS
 from financial_sim.ui_service.projection import (
     agent_detail,
     banks_table,
+    central_bank_view,
     firms_table,
+    government_view,
+    households_stats,
     macro_frame,
+    network_view,
+    sectors_matrix,
     series,
+    sfc_view,
     shock_log_view,
+    stress_view,
 )
 from financial_sim.ui_service.registry import RunningSim, SimulationRegistry
 
@@ -38,12 +46,33 @@ class CommandRequest(BaseModel):
 
 
 class InterventionBody(BaseModel):
-    preset: str | None = None            # PRESET_SHOCKS 名 (推荐)
-    channel: str | None = None           # 或自定义通道
+    preset: str | None = None          # PRESET_SHOCKS 名 (推荐)
+    channel: str | None = None         # 或自定义通道
     magnitude: float | None = None
     duration: int = 1
     one_shot: bool = True
     trigger_offset: int = 0              # 相对当前 t 的偏移 (≥0)
+
+
+# 自定义干预通道白名单 (preset 之外唯一可写入口)
+CUSTOM_CHANNELS = [
+    "policy_rate", "gov_spending", "tax_rate",
+    "wage_shock", "energy_price", "housing_yield_target",
+]
+
+# 预设冲击的中文说明 (供 /api/meta → 前端渲染)
+PRESET_DESCRIPTIONS = {
+    "rate_hike_100bp": "激进加息 100bp (单期)",
+    "tightening_50bp_6m": "持续紧缩 +50bp × 6 月",
+    "easing_50bp_6m": "持续宽松 −50bp × 6 月",
+    "fiscal_austerity_30p_12m": "财政紧缩: 支出 −30% × 12 月",
+    "fiscal_stimulus_20p_12m": "财政刺激: 支出 +20% × 12 月",
+    "tax_hike_5pp_24m": "所得税 +5pp × 24 月",
+    "wage_shock_plus10p": "工资一次性 +10%",
+    "wage_shock_minus10p": "工资一次性 −10%",
+    "energy_shock_plus30p": "能源价格 +30% × 12 月",
+    "housing_risk_premium_spike": "房贷风险溢价 +4pp (2008 型)",
+}
 
 
 def create_app() -> FastAPI:
@@ -61,10 +90,7 @@ def create_app() -> FastAPI:
         return rs
 
     def _validate_shock(channel: str, magnitude: float) -> None:
-        known = set(PRESET_SHOCKS.keys()) | {
-            "policy_rate", "gov_spending", "tax_rate",
-            "wage_shock", "energy_price", "housing_yield_target",
-        }
+        known = set(PRESET_SHOCKS.keys()) | set(CUSTOM_CHANNELS)
         if channel not in known:
             raise HTTPException(
                 422,
@@ -165,6 +191,25 @@ def create_app() -> FastAPI:
         with rs.lock:
             return series(rs.state, from_t=from_t, to_t=to_t)
 
+    # 注意: 这两条必须在 /agents/{sector} 之前注册, 否则被通配吃掉
+    @app.get("/api/sims/{sim_id}/agents/government")
+    def gov_view(sim_id: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            view = government_view(rs.state)
+        if view is None:
+            raise HTTPException(404, "政府主体不存在")
+        return view
+
+    @app.get("/api/sims/{sim_id}/agents/central_bank")
+    def cb_view(sim_id: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            view = central_bank_view(rs.state)
+        if view is None:
+            raise HTTPException(404, "央行主体不存在")
+        return view
+
     @app.get("/api/sims/{sim_id}/agents/{sector}")
     def agents_table(sim_id: str, sector: str) -> list[dict]:
         rs = _get(sim_id)
@@ -183,6 +228,80 @@ def create_app() -> FastAPI:
         if view is None:
             raise HTTPException(404, f"{sector}/{agent_id} 不存在")
         return view
+
+    @app.get("/api/sims/{sim_id}/households")
+    def households_panel(sim_id: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            return households_stats(rs.state)
+
+    @app.get("/api/sims/{sim_id}/sectors")
+    def sectors(sim_id: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            return sectors_matrix(rs.state)
+
+    @app.get("/api/sims/{sim_id}/network/{kind}")
+    def network(sim_id: str, kind: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            view = network_view(rs.state, kind)
+        if view is None:
+            raise HTTPException(
+                404, f"未知网络类型: {kind}; 可用: interbank, cross_holdings"
+            )
+        return view
+
+    @app.get("/api/sims/{sim_id}/stress")
+    def stress(sim_id: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            return stress_view(rs.state)
+
+    @app.get("/api/sims/{sim_id}/sfc")
+    def sfc_detail(sim_id: str) -> dict:
+        rs = _get(sim_id)
+        with rs.lock:
+            return sfc_view(rs.state)
+
+    @app.get("/api/meta")
+    def meta() -> dict:
+        """场景 + 冲击预设元数据 (前端不再硬编码副本)."""
+        import yaml as _yaml
+
+        scenarios_out = []
+        for name in list_scenarios():
+            path = (
+                Path(__file__).resolve().parent.parent.parent
+                / "scenarios" / f"{name}.yaml"
+            )
+            desc, disp = "", name
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    data = _yaml.safe_load(f) or {}
+                desc = str(data.get("description", ""))
+                disp = str(data.get("name", name))
+            except OSError:
+                pass
+            scenarios_out.append(
+                {"id": name, "name": disp, "description": desc}
+            )
+        return {
+            "scenarios": scenarios_out,
+            "shock_presets": [
+                {
+                    "id": pid,
+                    "channel": cfg["channel"],
+                    "magnitude": cfg["magnitude"],
+                    "duration": cfg.get("duration", 1),
+                    "one_shot": cfg.get("one_shot", True),
+                    "description": PRESET_DESCRIPTIONS.get(pid, ""),
+                }
+                for pid, cfg in PRESET_SHOCKS.items()
+            ],
+            "custom_channels": CUSTOM_CHANNELS,
+            "limits": {"max_sims": 8, "speed_range": [0, 60]},
+        }
 
     @app.get("/api/sims/{sim_id}/interventions")
     def interventions(sim_id: str) -> list[dict]:

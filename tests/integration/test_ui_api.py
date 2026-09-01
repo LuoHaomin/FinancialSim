@@ -194,3 +194,99 @@ class TestDeterminism:
             s = client.get(f"/api/sims/{sim_id}/series").json()
             histories.append((s["t"], s["real_gdp"], s["policy_rate"]))
         assert histories[0] == histories[1]
+
+
+class TestExtendedProjections:
+    """Phase A 扩展投影端点: 部门矩阵 / 家庭分布 / 政府央行 / 网络 / 压力 / SFC."""
+
+    def test_meta_endpoint(self, client):
+        meta = client.get("/api/meta").json()
+        ids = [s["id"] for s in meta["scenarios"]]
+        assert "baseline" in ids
+        assert "crisis_2008" in ids
+        presets = {p["id"] for p in meta["shock_presets"]}
+        assert "rate_hike_100bp" in presets
+        assert "policy_rate" in meta["custom_channels"]
+
+    def test_sectors_matrix_balanced(self, client):
+        sim_id = _mk_sim(client)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 3})
+        r = client.get(f"/api/sims/{sim_id}/sectors")
+        assert r.status_code == 200
+        sectors = r.json()["sectors"]
+        # 基础 5 部门必须存在 (NBFI 可选)
+        for name in ("households", "firms", "banks", "government", "cb"):
+            assert name in sectors
+            s = sectors[name]
+            assert abs(
+                s["total_assets"] - s["total_liabilities"] - s["net_worth"]
+            ) < 1e-3 * max(1.0, abs(s["total_assets"]))
+            assert s["balanced"]
+
+    def test_households_stats(self, client):
+        sim_id = _mk_sim(client)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 3})
+        st = client.get(f"/api/sims/{sim_id}/households").json()
+        assert st["n"] == 100
+        assert 0 <= st["gini_wealth"] <= 1
+        assert len(st["wealth_quintiles"]) == 5
+        # 分位数均值单调不减 (数值容差内)
+        q = st["wealth_quintiles"]
+        assert all(q[i] <= q[i + 1] + 1e-9 for i in range(4))
+        assert 0 <= st["homeownership_rate"] <= 1
+
+    def test_government_and_cb_views(self, client):
+        sim_id = _mk_sim(client)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 2})
+        gov = client.get(f"/api/sims/{sim_id}/agents/government").json()
+        assert "bonds_outstanding" in gov["liabilities"]
+        assert "income_tax_rate" in gov["parameters"]
+        cb = client.get(
+            f"/api/sims/{sim_id}/agents/central_bank"
+        ).json()
+        assert "bank_reserves" in cb["liabilities"]
+        assert "policy_rate" in cb["policy"]
+        assert cb["monetary_base"] > 0
+
+    def test_interbank_network_shape(self, client):
+        sim_id = _mk_sim(client, n_banks=5)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 2})
+        net = client.get(
+            f"/api/sims/{sim_id}/network/interbank"
+        ).json()
+        assert net["kind"] == "interbank"
+        ids = {n["id"] for n in net["nodes"]}
+        assert len(ids) == 5
+        for e in net["edges"]:
+            assert e["source"] in ids
+            assert e["target"] in ids
+            assert e["value"] > 0
+        # 未知类型 404
+        assert client.get(
+            f"/api/sims/{sim_id}/network/friendship"
+        ).status_code == 404
+
+    def test_stress_view(self, client):
+        sim_id = _mk_sim(client)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 3})
+        st = client.get(f"/api/sims/{sim_id}/stress").json()
+        assert 0 <= st["fire_sale_pressure"] <= 1
+        assert st["bank_car"]["mean"] is not None
+        assert st["housing"]["price"] > 0
+
+    def test_sfc_view_zero_when_clean(self, client):
+        sim_id = _mk_sim(client)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 5})
+        sfc = client.get(f"/api/sims/{sim_id}/sfc").json()
+        assert sfc["total_count"] == 0
+        assert sfc["detail"] == []
+
+    def test_series_extended_keys(self, client):
+        sim_id = _mk_sim(client)
+        client.post(f"/api/sims/{sim_id}/command", json={"step": 6})
+        s = client.get(f"/api/sims/{sim_id}/series").json()
+        for key in ("nominal_gdp", "avg_wage", "total_consumption",
+                    "total_output", "housing_price", "price_level"):
+            assert len(s[key]) == len(s["t"])
+        # 对齐后不应有 None (历史同步追加)
+        assert all(v is not None for v in s["price_level"])
