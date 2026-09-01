@@ -25,9 +25,11 @@ MAX_TICKS = 240  # baseline (1200) 截断, 控制矩阵耗时
 
 # (scenario, seed) → (real_gdp_end, u_end, u_max, sfc_violations)
 GOLDEN: dict[tuple[str, int], tuple[float, float, float, int]] = {
-    ("baseline", 7): (1432.9429, 0.0, 0.007, 0),
-    ("baseline", 42): (1432.9429, 0.0, 0.004, 0),
-    ("baseline", 99): (1432.9429, 0.0, 0.007, 0),
+    # baseline 2026-09-01 重采: PR-7 第二期校准 (多部门 + 财政可持续
+    # G=0.40/τ=0.35 + potential_gdp 随 TFP 增长修复 Taylor 加息雪崩)
+    ("baseline", 7): (1356.8599, 0.0, 0.492, 0),
+    ("baseline", 42): (1344.8775, 0.0, 0.501, 0),
+    ("baseline", 99): (1337.8212, 0.0, 0.518, 0),
     ("crisis_2008", 7): (218.8201, 0.0, 0.005, 0),
     ("crisis_2008", 42): (218.8201, 0.0, 0.0, 0),
     ("crisis_2008", 99): (218.8201, 0.0, 0.005, 0),

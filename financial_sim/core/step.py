@@ -2125,6 +2125,12 @@ def _aggregate_macros(state: SimulationState) -> None:
     else:
         new_price_level = state.price_level
     state.unemployment_rate = state.unemployment_rate_calc()
+    # 潜在产出随生产率增长 (PR-7 校准): potential 原为静态 n_hh, 而 real_gdp
+    # 随 TFP 增长 → 产出缺口线性发散 → Taylor rule 永远加息 (实测 240 月
+    # r 21%, 1200 月 r 200%+, IOR 按高利率向银行资本泵钱直至 CB BS 爆表).
+    prod_g_pot = float(_cfg(state, "productivity_growth_monthly", 0.0))
+    if prod_g_pot > 0 and state.potential_gdp > 0:
+        state.potential_gdp *= 1.0 + prod_g_pot
     state.output_gap = (
         (state.real_gdp - state.potential_gdp) / state.potential_gdp
         if state.potential_gdp > 0

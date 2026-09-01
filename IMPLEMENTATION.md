@@ -39,7 +39,7 @@
 | PR-4 同业动态化 | ✅ | `InterbankNetwork.rewire()` 季度重连（按 CAR 重排核心）；多银行 init 自动启用网络；`rebalance_reserves` 暂禁用（跨银行 per-bank BS 不平衡，见残留 #4） |
 | PR-5 NBFI 全开 | ✅ | 7 个 flag 默认开 + 5 处 SFC 修复（见 §4 记账规格）；行为验收测试曾钉住各 Phase 模块组合，PR-7 后解除 |
 | PR-6 回归矩阵 | ✅ | `tests/integration/test_regression_matrix.py`：7 场景 × 3 种子 = 63 用例，零 SFC + 矩有限性 + golden 逐位锁定。**行为有意变更时必须显式重采 golden** |
-| PR-7 失真分析 | ✅(第一期) | 供应链冷启动死亡螺旋修复（见 §5 校准记录 #1）；labor/multifirm/multisector/stock 验收测试解除钉住、全开通过 |
+| PR-7 失真分析 | ✅(两期) | 第一期: 供应链冷启动死亡螺旋（§5 #1）; 第二期: baseline 长跑三连修 — potential_gdp 静态致 Taylor 加息雪崩/SFC 违反、场景单企业经济、财政不可持续（§5 #2） |
 
 **Phase 3.5 之前的阶段速览**：
 
@@ -55,7 +55,7 @@
 ### 当前残留与已知限制（按优先级）
 
 1. **log-wealth 分布再校准**：债券市场默认开后 log-wealth 偏度 -0.83 → -1.1~-1.5。机制：赤字强制家庭认购国债 = 流动性再分配，痛集中在低存款户（需求收缩的收入损失也在底部）。已试"降低家庭认购份额"与"流动性缓冲保护"两个修法均无效，需专项设计（候选项：付息融资/期限结构/财政规则）。校准套件因此仍钉在核心体制。
-2. **stagflation 场景全灭**：场景未配 `sectors` → 默认单企业经济，扛不住能源+工资冲击（HEAD 全关下也死，既有问题）。修法方向：场景 YAML 配多部门。
+2. **其余场景 YAML 单企业经济**：stagflation 等未配 `sectors` 的场景默认只有 1 家企业，扛不住冲击（stagflation 在 HEAD 全关下也全灭）。baseline 已于 PR-7 第二期配六部门；其余场景待逐个配置+重采 golden。
 3. **冲击对 real_gdp 钝化**：财政/货币冲击通道本身生效（乘数、房价、银行失败均验证），但 real_gdp 几乎不动。HEAD 既有，非 PR-5 回归；与 #1 同属分布/动态再校准课题。
 4. **跨银行 per-bank BS 不平衡**：`rebalance_reserves` 暂禁用（PR-4 遗留）。
 5. **Week-C 组合再平衡横截面梯度**：高偏好群体受现金/供给双约束，xfail 标注中。
@@ -133,7 +133,16 @@ tests/{unit,integration,calibration}/
 - 原值/症状：300 户全开经济首拍 u 40%（供应商零库存 → util=0 → 产出全额折减）；t=12 预热概念引入前 u_max 0.89
 - 改动：① `io_warmup_months=12`（预热期照常采购但不折减产出）；② 产出折减按 IO 成本份额加权 `eff_util = 1 − share×(1−util)`（原 `eff_a = A×util` 硬折减使 10% 投入缺口清零产出）；Firm 新增 `io_input_share`
 - 效果：u_end 0.42→0.00，gdp 112→325（全关基准 349）；labor/multifirm/multisector/stock 验收全开通过
-- 副作用监测：回归矩阵 golden 无漂移（场景经济为单部门，无 IO 约束路径）
+- 副作用监测：回归矩阵 golden 无漂移（当时场景经济为单部门，无 IO 约束路径）
+
+**#2 baseline 长跑失真三连修（PR-7 第二期, 2026-09-01）**
+
+用户实测 baseline 1200 月：政策利率一路飙升（240 月 21%、1200 月 200%+），t≈241 起 SFC 违反，银行资本指数爆炸（2 万 → 1e27）。三个耦合根因：
+
+1. **potential_gdp 静态 → Taylor 加息雪崩**：potential=n_hh 恒定而 real_gdp 随 TFP 增长 → 产出缺口无界 → r 永远加息 → IOR 按高利率向银行资本泵钱（CB 资本对应失血至 BS 爆表，即观测到的首个 SFC 违反）→ 高利率再引爆信贷违约级联。修复：`_aggregate_macros` 中 potential 随 `productivity_growth_monthly` 增长。效果：1200 月零 SFC 违反，r 贴近中性水平。
+2. **baseline 场景单企业经济**：YAML 未配 sectors → 默认 consumer_goods×1 家雇着全部 1000 人，一次现金流冲击（加税）即全员失业。修复：baseline.yaml 配六部门。**其余场景 YAML 同病，待逐个配**（见残留 #2）。
+3. **财政不可持续**：G=0.45/τ=0.25 → 结构性赤字 ≈25% 月度 GDP，债务 600 月冲到 6.4 倍年化。校准 G=0.40/τ=0.35 → 债务稳定 ~1.8 倍年化，稳态失业 ~6%（摩擦性），通胀 ~0.6%，零企业破产。
+- 副作用监测：① 回归矩阵 baseline golden 重采（1356/1344/1338 × seed 7/42/99）；② log-wealth 偏度 -0.83→-1.37——加息雪崩驯服后政策/存款利率回落，高存款户利息红利缩水、右尾变短，属更健康体制下的分布变化，阈值 <1.0→<1.5 已记录（tests/calibration/test_stylized_facts.py）。
 
 ### Phase 5 校准与验证（持续运行）
 
