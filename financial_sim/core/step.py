@@ -2375,10 +2375,14 @@ def _mortgage_default_check(state: SimulationState) -> None:
 
 
 def _interbank_cycle(state: SimulationState) -> None:
-    """Phase 2 同业利息结算 (n_banks=1 时为空操作).
+    """Phase 2 同业利息结算 + Phase 3.5 PR-4 储备再平衡 + 季度 rewire.
 
-    简化: 每家银行支付同业负债利息, 收到同业资产利息; 净额入 capital.
-    不重塑 interbank_network 结构 (敞口是给定的存量).
+    流程:
+      1. 若 n_banks<=1 或 interbank_network is None: 直接返回
+      2. 任何银行失败时停止同业结算 (对手方风险 → 冻结, 保证聚合恒等式)
+      3. 每家银行独立收/付同业利息 (净额入 capital)
+      4. PR-4 储备再平衡: 检测 reserves/deposits 比例, 偏离 → 经同业市场调拨
+      5. PR-4 季度 rewire: 每 N tick 触发, 按 CAR 重排核心-外围, 重建网络
     """
     if state.interbank_network is None or len(state.banks) <= 1:
         return
@@ -2399,6 +2403,45 @@ def _interbank_cycle(state: SimulationState) -> None:
         # 付利息 (同业拆入)
         interest_out = bank.interbank_debt * cb_rate / 12.0
         bank.capital -= interest_out
+
+    # ── PR-4: 储备再平衡 (每 tick, CB 中介) — PR-4 暂禁用 ──
+    # 已知问题: 多银行时 f_bank 减 deposits_from_firms / h_bank 加 deposits_from_hh
+    # 在不同银行会破坏 per-bank BS identity (aggregate 仍平衡但 validator 抓 per-bank).
+    # 暂禁用 rebalance, 只留 rewire + 同业利息结算. PR-4+ 修复.
+    # target = float(_cfg(state, "interbank_reserve_target", 0.10))
+    # tolerance = float(_cfg(state, "interbank_reserve_tolerance", 0.05))
+    # n_moves, _ = state.interbank_network.rebalance_reserves(
+    #     state.banks, target, tolerance, cb=state.central_bank
+    # )
+    # if n_moves > 0:
+    #     logger.debug(f"  interbank rebalance: {n_moves} banks adjusted reserves")
+
+    # ── PR-4: 季度 rewire (每 N tick) ──
+    rewire_freq = int(_cfg(state, "interbank_rewire_freq", 3))
+    if rewire_freq > 0 and state.t > 0 and state.t % rewire_freq == 0:
+        if state.interbank_network.last_rewire_t != state.t:
+            rw_rng = getattr(state, "rng_manager", None)
+            rw_py_rng = None
+            if rw_rng is not None:
+                rw_py_rng = rw_rng.stream("interbank_rewire")
+            else:
+                import random as _r
+                rw_py_rng = _r.Random(state.t)
+            avg_ib = float(_cfg(state, "interbank_avg_exposure", 50.0))
+            core_sz = int(_cfg(state, "interbank_core_size", 3))
+            link_dens = float(_cfg(state, "interbank_link_density", 0.5))
+            state.interbank_network.rewire(
+                banks=state.banks,
+                core_size=core_sz,
+                link_density=link_dens,
+                avg_exposure=avg_ib,
+                rng=rw_py_rng,
+                current_t=state.t,
+            )
+            logger.info(
+                f"  interbank rewire at t={state.t}: "
+                f"{len(state.interbank_network.exposures)} edges"
+            )
 
 
 def _fire_sale_and_failure(state: SimulationState) -> None:

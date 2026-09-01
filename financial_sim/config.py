@@ -258,6 +258,10 @@ class SimConfig(BaseModel):
     n_banks: int = Field(default=1, ge=1)   # 银行数 (默认 1 保持 backward-compat)
     interbank_core_size: int = 3            # Core-Periphery 网络的核心银行数
     interbank_link_density: float = 0.5     # Periphery 连接到核心的概率
+    interbank_avg_exposure: float = 50.0    # Phase 3.5 PR-4: 平均初始同业敞口
+    interbank_rewire_freq: int = 3         # Phase 3.5 PR-4: 重连频率 (每 N tick 触发一次; 默认季频)
+    interbank_reserve_target: float = 0.10  # Phase 3.5 PR-4: 储备目标 (占 deposits 比例)
+    interbank_reserve_tolerance: float = 0.05  # Phase 3.5 PR-4: 储备容差 (低于则拆入, 高于则拆出)
 
     # ── Fire-sale (Phase 2) ──
     fire_sale_price_impact: float = 0.05    # 1 单位抛售压低 X% 的市场价

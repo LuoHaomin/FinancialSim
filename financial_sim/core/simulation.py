@@ -347,16 +347,42 @@ class Simulation:
         # 分配到银行间", 而不是凭空创造/销毁资本.
         # (历史 bug: 早期版本把 `creditor.capital += amount` 写在了这里,
         # 导致聚合 BS 不平衡 −2409 单位, 第一 tick 就被 SFC 检查捕获.)
-        # ⚠️ 已知简化 (Phase 3 Week E 修复): 当前 multi-bank 初始化**不**真正
-        # 注入同业敞口 — 因为:
-        #   1. 主银行之外的银行初始 reserves=0 (它们的钱都存主银行);
-        #   2. 真正"开同业关系"意味着主银行减 reserves, 外围银行增 reserves;
-        #   3. 但外围银行的 reserves 走的是"从主银行拆借", 这会引入循环依赖.
-        # 暂用 interbank=None + interbank_network=None, crisis 场景跑单银行
-        # (n_banks=1) 即可演示银行失败 + 政府救助; 多银行的同业敞口留 Phase 3.
+        # Phase 3.5 PR-4: 多银行时启用同业网络 (InterbankNetwork).
+        # - n_banks=1: 维持 None (单银行无同业需求)
+        # - n_banks>=2: 构造 Core-Periphery 静态拓扑 + 平均初始敞口
+        #   (PR-4-rewire 后续季度重连)
         interbank: InterbankNetwork | None = None
-        # 多银行模式在 Phase 3 Week E 修复前**禁用** — 见上方说明.
-        # 多银行场景的 SFC 校验依赖 Phase 3 真实的多银行账目拆分.
+        if n_banks >= 2:
+            ib_rng = self.rng.stream("interbank_init")
+            avg_ib_exposure = float(
+                getattr(config, "interbank_avg_exposure", 50.0)
+            )
+            interbank = InterbankNetwork.build_core_periphery(
+                bank_ids=[b.id for b in banks],
+                core_size=int(getattr(config, "interbank_core_size", 3)),
+                link_density=float(
+                    getattr(config, "interbank_link_density", 0.5)
+                ),
+                avg_exposure=avg_ib_exposure,
+                rng=ib_rng,
+            )
+            # 把初始同业敞口分配到银行的 interbank_claims/debt (SFC 自平衡:
+            # 每笔敞口的 lender 是另一笔的 borrower, Σ=0)
+            for (creditor_id, debtor_id), amt in interbank.exposures.items():
+                cred = next(
+                    (b for b in banks if b.id == creditor_id), None
+                )
+                debe = next(
+                    (b for b in banks if b.id == debtor_id), None
+                )
+                if cred is not None and debe is not None:
+                    cred.interbank_claims += amt
+                    debe.interbank_debt += amt
+            logger.info(
+                f"PR-4 interbank init: n_banks={n_banks}, "
+                f"avg_exposure={avg_ib_exposure}, "
+                f"edges={len(interbank.exposures)}"
+            )
 
         # ── 央行 + 政府: 镜像准备金 (CB 持等额国债) ──
         cb.bank_reserves = total_reserves
