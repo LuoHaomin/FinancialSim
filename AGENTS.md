@@ -193,3 +193,4 @@ WS 帧含 `macro` + `events_fired` + `sfc_violations` 计数。
 | 校准目标 | `docs/VALIDATION.md` |
 | 预期形成 | `docs/EXPECTATIONS.md` |
 | 前端架构 / WS 协议 | `docs/FRONTEND_DESIGN.md` |
+| 前端使用说明 (启动/视图导览) | `frontend/README.md` |

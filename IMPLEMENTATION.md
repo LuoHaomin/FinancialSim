@@ -1,9 +1,9 @@
 # ABM 宏观经济仿真器：实现总账
 
-> 状态：Phase 0-2 ✅ / Phase 3 ✅ / Phase 4 MVP ✅ / **Phase 3.5 架构收尾 ✅**（PR-1..7 全部完成）
+> 状态：Phase 0-2 ✅ / Phase 3 ✅ / Phase 3.5 架构收尾 ✅ / **Phase 4 前端完整版 ✅**（MVP → 四层下钻 + WS 实时）
 > 最后更新：2026-09-01
-> 测试基线：439 passed · 1 xfail（组合再平衡横截面梯度，待重校准）· ruff clean · 回归矩阵零 SFC 违反
-> 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)；前端方案 [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md)
+> 测试基线：447 passed · 1 xfail（组合再平衡横截面梯度，待重校准）· ruff clean · 回归矩阵零 SFC 违反
+> 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)；前端方案 [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md)；**前端使用说明 [frontend/README.md](frontend/README.md)**
 >
 > 历史里程碑的逐周过程细节（Phase 0-3 逐日/逐周记录、3.5.A-F 实施方案原文）已压缩进本总账，
 > 完整过程见 `git log -- IMPLEMENTATION.md`。
@@ -11,6 +11,21 @@
 ---
 
 ## 0. 进度总账
+
+### Phase 4 完整版 — 前端 & 连接层升级（2026-09-01，完成）
+
+> MVP（WS 零帧处理、2s 轮询、仅企业/银行下钻）升级为对齐 `docs/FRONTEND_DESIGN.md` 的实现。
+> 三条铁律（只读投影 / 干预走 ShockEvent / 同 seed 逐位复现）不变；**未动仿真内核**（仅 `ui_service/` 只读投影层）。
+
+| 部分 | 内容 |
+|---|---|
+| 后端投影 A | `series` 全字段（nominal_gdp/wage/consumption/output/price_level，tick 位置对齐修复原尾部切片错位风险）；新端点 `/sectors`（7 部门 Godley 矩阵 + A=L+NW 标记）、`/households`（Gini/五分位/直方图/断供压力，服务端聚合不暴露 agent）、`/agents/government\|central_bank`、`/network/{interbank\|cross_holdings}`、`/stress`、`/sfc`（逐 tick 详情）、`/api/meta`（场景+预设元数据，消灭前端硬编码） |
+| 连接层 B | WS 协议 v1 成为主通道：tick 帧增量更新（`state.t` ↔ 快照标签 `t-1` 语义对齐，与 REST 回填无重复）、`set_speed/pause/step/run_to` 上行命令、指数退避重连 + REST 断线兜底、每 25 tick 全量重同步；`stores/` 拆分 connection + toasts |
+| UI C | 深色终端设计系统；五视图（宏观 KPI+dataZoom 主图+压力遥测 / 部门矩阵 / 家庭分布 / 下钻含政府央行 / d3-force 网络图）；企业表搜索排序分页；速度滑条 + run_to + 多实例切换；SFC 全局警报条 |
+| 测试 D | `TestExtendedProjections` 8 项 integration；e2e 扩到全视图 + WS 断言（`npm run e2e`）；svelte-check 0 错误 |
+
+已知未做：L3 的 12 个月迷你走势（需内核存 agent 级历史，暂缓）；W6 场景编辑器仍延后。
+
 
 ### Phase 3.5 — 完整架构收尾（2026-08-28 ~ 09-01，全部完成）
 
@@ -35,6 +50,7 @@
 | Phase 2 | 房产/抵押/NPL→REO→fire-sale、多银行(主银行语义)+同业敞口、银行失败处置、2008 危机全链路涌现 |
 | Phase 3 | P0-a/b/c 前置(消费贷/债市/场景库)、Week A 多部门+CES+投资实流、Week B 动态劳动需求+疤痕+G 实流、Week C Brock-Hommes+组合选择+交叉持股、Week D 投行+资管+FSIC、Week E-M1 供应链 IO、Week F 场景库扩到 7 个 |
 | Phase 4 MVP | `ui_service/`（只读投影 + 干预网关 + WS）+ `frontend/`（Svelte5 宏观看板 + 部门下钻）；W5 网络视图/W6 场景编辑器延后二期 |
+| Phase 4 完整版 | 见上方专节：后端 8 组投影端点 + WS 实时主通道 + 四层下钻 UI（W5 网络视图已交付） |
 
 ### 当前残留与已知限制（按优先级）
 
