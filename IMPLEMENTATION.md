@@ -39,7 +39,7 @@
 | PR-4 同业动态化 | ✅ | `InterbankNetwork.rewire()` 季度重连（按 CAR 重排核心）；多银行 init 自动启用网络；`rebalance_reserves` 暂禁用（跨银行 per-bank BS 不平衡，见残留 #4） |
 | PR-5 NBFI 全开 | ✅ | 7 个 flag 默认开 + 5 处 SFC 修复（见 §4 记账规格）；行为验收测试曾钉住各 Phase 模块组合，PR-7 后解除 |
 | PR-6 回归矩阵 | ✅ | `tests/integration/test_regression_matrix.py`：7 场景 × 3 种子 = 63 用例，零 SFC + 矩有限性 + golden 逐位锁定。**行为有意变更时必须显式重采 golden** |
-| PR-7 失真分析 | ✅(两期) | 第一期: 供应链冷启动死亡螺旋（§5 #1）; 第二期: baseline 长跑三连修 — potential_gdp 静态致 Taylor 加息雪崩/SFC 违反、场景单企业经济、财政不可持续（§5 #2） |
+| PR-7 失真分析 | ✅(三期) | 第一期: 供应链冷启动死亡螺旋（§5 #1）; 第二期: baseline 长跑三连修（§5 #2）; 第三期: 全部 7 个场景配六部门 + crisis_2008 配 n_banks=3 启用同业传染链 |
 
 **Phase 3.5 之前的阶段速览**：
 
@@ -55,7 +55,7 @@
 ### 当前残留与已知限制（按优先级）
 
 1. **log-wealth 分布再校准**：债券市场默认开后 log-wealth 偏度 -0.83 → -1.1~-1.5。机制：赤字强制家庭认购国债 = 流动性再分配，痛集中在低存款户（需求收缩的收入损失也在底部）。已试"降低家庭认购份额"与"流动性缓冲保护"两个修法均无效，需专项设计（候选项：付息融资/期限结构/财政规则）。校准套件因此仍钉在核心体制。
-2. **其余场景 YAML 单企业经济**：stagflation 等未配 `sectors` 的场景默认只有 1 家企业，扛不住冲击（stagflation 在 HEAD 全关下也全灭）。baseline 已于 PR-7 第二期配六部门；其余场景待逐个配置+重采 golden。
+2. **stagflation 深衰退**：多部门改造后从"全灭"变为部分幸存并缓慢恢复，但 60 月内仍深衰退（能源+工资冲击设计本就猛烈）。如需更贴近 1970s 实际（u~10%），需继续调冲击量级。
 3. **冲击对 real_gdp 钝化**：财政/货币冲击通道本身生效（乘数、房价、银行失败均验证），但 real_gdp 几乎不动。HEAD 既有，非 PR-5 回归；与 #1 同属分布/动态再校准课题。
 4. **跨银行 per-bank BS 不平衡**：`rebalance_reserves` 暂禁用（PR-4 遗留）。
 5. **Week-C 组合再平衡横截面梯度**：高偏好群体受现金/供给双约束，xfail 标注中。
@@ -134,6 +134,10 @@ tests/{unit,integration,calibration}/
 - 改动：① `io_warmup_months=12`（预热期照常采购但不折减产出）；② 产出折减按 IO 成本份额加权 `eff_util = 1 − share×(1−util)`（原 `eff_a = A×util` 硬折减使 10% 投入缺口清零产出）；Firm 新增 `io_input_share`
 - 效果：u_end 0.42→0.00，gdp 112→325（全关基准 349）；labor/multifirm/multisector/stock 验收全开通过
 - 副作用监测：回归矩阵 golden 无漂移（当时场景经济为单部门，无 IO 约束路径）
+
+**#3 场景库多部门/多银行适配（PR-7 第三期, 2026-09-01）**
+- 其余 6 个场景 YAML 全部配六部门 sectors（同 baseline 的单企业脆弱性）；crisis_2008 配 `n_banks=3` —— 该场景设计目标含"银行失败 → 同业传染"，单银行走 bailout 快路径根本跑不到传染链（配后实测 3 家银行接连失败、网络敞口在传染中清零）
+- golden 全矩阵重采；stagflation 从三种子全灭变为部分幸存并恢复；全部零 SFC
 
 **#2 baseline 长跑失真三连修（PR-7 第二期, 2026-09-01）**
 

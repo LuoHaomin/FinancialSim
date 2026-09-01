@@ -9,6 +9,9 @@ seed: 11
 n_ticks: 48
 n_households: 200
 
+# 多部门经济 (PR-7): 默认单企业扛不住冲击, 六部门分散主体风险.
+sectors: [consumer_goods, capital, energy, housing_services, high_tech, services]
+
 gov_spending_share_gdp: 0.30   # 紧缩财政
 income_tax_rate: 0.25
 

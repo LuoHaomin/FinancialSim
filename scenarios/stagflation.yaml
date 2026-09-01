@@ -12,6 +12,9 @@ seed: 11
 n_ticks: 60
 n_households: 200
 
+# 多部门经济 (PR-7): 默认单企业扛不住冲击, 六部门分散主体风险.
+sectors: [consumer_goods, capital, energy, housing_services, high_tech, services]
+
 taylor_inflation_coeff: 1.5
 taylor_output_coeff: 0.5
 gov_spending_share_gdp: 0.45
