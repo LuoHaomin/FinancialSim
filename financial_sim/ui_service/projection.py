@@ -20,14 +20,18 @@ SERIES_KEYS = (
 
 
 def macro_frame(state: SimulationState) -> dict:
-    """单 tick 的 WS 帧 macro 部分."""
+    """单 tick 的 WS 帧 macro 部分 (与 SERIES_KEYS 对齐 + 房价)."""
     return {
         "real_gdp": round(state.real_gdp, 6),
+        "nominal_gdp": round(state.nominal_gdp, 6),
         "inflation_yoy": round(state.inflation_yoy, 6),
         "unemployment_rate": round(state.unemployment_rate, 6),
         "policy_rate": round(
             state.central_bank.policy_rate if state.central_bank else 0.0, 6
         ),
+        "avg_wage": round(state.avg_wage(), 6),
+        "total_consumption": round(state.total_consumption(), 6),
+        "total_output": round(state.total_output(), 6),
         "housing_price": round(state.housing_price, 6),
     }
 

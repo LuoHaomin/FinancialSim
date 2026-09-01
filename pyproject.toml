@@ -93,6 +93,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["B011", "ERA001", "E741"]  # asserts, doc-comments, single-letter vars OK in tests
+"frontend/tests/*.py" = ["ERA001"]  # e2e 冒烟里的中文段落注释
 "**/__init__.py" = ["F401"]  # re-exports OK
 "financial_sim/**/*.py" = ["ERA001", "E741"]  # Chinese inline comments OK in source
 

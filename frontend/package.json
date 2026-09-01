@@ -7,11 +7,13 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "e2e": "cd .. && uv run python frontend/tests/e2e_smoke.py"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tsconfig/svelte": "^5.0.8",
+    "@types/d3-force": "^3.0.10",
     "@types/node": "^24.13.3",
     "svelte": "^5.56.10",
     "svelte-check": "^4.7.6",
@@ -19,6 +21,7 @@
     "vite": "^8.2.2"
   },
   "dependencies": {
+    "d3-force": "^3.0.0",
     "echarts": "^6.1.0"
   }
 }
