@@ -21,7 +21,7 @@ frontend/                # Svelte 5 + TS + Vite + ECharts (独立 npm)
 scenarios/*.yaml         # 7 个预设场景 (baseline / crisis_2008 / stagflation …)
 tests/{unit,integration,calibration}/
 docs/                    # 设计文档; docs/AGENTS.md 是**主体层设计**,别和本文件混
-IMPLEMENTATION.md        # 实现总账:Phase 进度 + 校准教训 + 记账规格(改前必读 §5)
+IMPLEMENTATION.md        # 实现总账:Phase 进度 + 记账规格(改前必读 §4) + 校准记录(§5)
 DESIGN.md                # 顶层设计
 ```
 
@@ -76,7 +76,7 @@ python frontend/tests/e2e_smoke.py        # 默认 http://localhost:5173/
 校验器:`financial_sim/monetary/sfc.py:validate_sfc()`(9 项跨部门检查,相对容差 `1e-9·scale`)。
 每次 `monthly_tick` 末尾跑一次;违反写到 `state.sfc_violations`(**不抛异常**,需查 meta 数值)。
 
-**历史 bug 高发模式**:任一负债变化必须对应资产或资本变化(LOlr 抹平资本、同业违约单边核销、利息资本化漏记收入)。改 `step.py` 前先在 `IMPLEMENTATION.md` §5 找到对应里程碑的记账规格。
+**历史 bug 高发模式**:任一负债变化必须对应资产或资本变化(LOlr 抹平资本、同业违约单边核销、利息资本化漏记收入)。改 `step.py` 前先在 `IMPLEMENTATION.md` §4 找到对应里程碑的记账规格。
 
 ### 3.2 单银行 / 多银行的"主银行"语义
 - `state.bank == state.banks[0]`(同一个实例,不是副本)。多银行初始化时 `interbank_network = None`(`core/simulation.py` 注释明确说明:Phase 3 Week E 前**禁止**依赖 n_banks > 1 的同业敞口)。
@@ -168,7 +168,7 @@ WS 帧含 `macro` + `events_fired` + `sfc_violations` 计数。
 
 ## 9. 改动前 checklist
 
-1. **改 `core/step.py` 任一资金流** — 先在 `IMPLEMENTATION.md` §5 找对应里程碑的记账规格,写双边镜像;配套负向测试。
+1. **改 `core/step.py` 任一资金流** — 先在 `IMPLEMENTATION.md` §4 找对应里程碑的记账规格,写双边镜像;配套负向测试。
 2. **新增 agent / 字段** — 必须:
    - 加进 `agents/<file>.py` dataclass
    - 加进 `monetary/balance_sheets.py` 对应 BS 类
@@ -185,7 +185,7 @@ WS 帧含 `macro` + `events_fired` + `sfc_violations` 计数。
 | 想了解什么 | 读哪里 |
 |---|---|
 | 整体设计 | `DESIGN.md` |
-| 进度 / Phase 计划 / 记账规格 / 校准教训 | `IMPLEMENTATION.md` |
+| 进度总账 / 记账规格 / 校准记录 / 残留限制 | `IMPLEMENTATION.md` |
 | 主体字段与行为 | `docs/AGENTS.md`(注意:这个文件是**领域设计**,不是 agent meta-doc) |
 | 市场机制 | `docs/MARKETS.md` |
 | 货币 + SFC | `docs/MONETARY.md` |

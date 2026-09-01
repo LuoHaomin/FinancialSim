@@ -1,856 +1,145 @@
-# ABM 宏观经济仿真器：实现计划
+# ABM 宏观经济仿真器：实现总账
 
-> 状态：Phase 0-2 ✅ / **Phase 3 核心完成 ✅** (A/B/C 全量 + D-M1/M2 + E-M1 + F 验收矩阵; E2 同业动态化如实挂起)
-> 最后更新：2026-08-27
-> 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)
-
----
-
-## 进度看板（2026-08-27 更新）
-
-**测试基线**: 337 passed · 5 xfail（均为已记录的校准后遗留项）· ruff clean · 7 场景 × 多种子零 SFC 违反
-
-**Phase 4 进展**: W1 API 骨架+只读投影 ✅ / W2 干预网关 ✅ (2026-08-27, `ui_service/`)
-**前端设计定稿**: [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md) (Phase 4 实现计划见 §6)
-
-### 经济模型整体校准（2026-08-27 完成）
-
-用户反馈基线经济"失真"，全面诊断后确认 8 处结构性缺陷并修复：
-
-1. **销售额单位/金额混用（最重）**: 消费与政府采购把"金额意向"直接对比
-   "数量库存"、劳动需求公式双重通缩 → 就业钉死满负荷、价格单向阴跌
-   （实测 60 月名义 GDP −88%、工资 −65% 的通缩螺旋）。统一 `last_sales`
-   为金额口径，消费/G/供应链三处按企业价格换算数量。
-2. **生产先于消费的时序颠倒**: 月初货架≈上月残余库存，长期缺货配给压低
-   销售信号 → 高失业陷阱。改为 `update_inventory` 先于消费。
-3. **定价无成本锚**: 纯库存规则的价格是随机游走且系统性向下漂移。改为
-   成本加成锚定 ((1+μ)·w/A) + 库存信号扰动 + 90% 成本下限浮动带。
-4. **贷款只息不本**: 营运资本透支永久累积、利息资本化 → 每 ~100-200 月
-   技术性破产一次。新增按月摊还 (`firm_loan_repayment_speed=0.30`)。
-5. **发薪时点先于收入进账**: 企业月初现金恒 < 工资单 → 永久透支。
-   发薪移至消费/政府采购回款之后。
-6. **银行 IOR 缺失**: 存款负债端 (~70k) 远大于贷款资产端, 政策利率一升
-   银行资本被机械性放血 → 每 ~10 年一次窄银行危机。新增央行准备金付息
-   （SFC: bank.reserves↑/capital↑ ↔ cb.bank_reserves↑/capital↓）。
-7. **TFP 增长通道缺失**: real GDP 永久冻结于初始水平。新增
-   `productivity_growth_monthly=0.0015` + 工资方程的生产率指数化。
-8. **劳动参数从未传导（重大 bug）**: `monthly_tick` 用裸构造
-   `LaborMarket()` 忽略 SimConfig 全部劳动参数, 生产路径跑的永远是类默认值，
-   `from_config` 只有测试在调用。修复为 `LaborMarket.from_config(state.config)`。
-
-附帯修正: 工资指数化量纲错误（年化通胀折半重复计入）导致实际工资爬升
-越过生产率；菲利普斯系数 0.10→0.04。
-
-**校准后基线画像 (240 月 × 4 seeds)**: 增长年化 ≈1.8%（与 TFP 一致）、
-通胀 +0.2%~2% 低波动、实际工资稳定（劳动份额合理）、企业零破产零债务、
-失业均值 <3%。替换了此前的"完美静态稳态 + 通缩螺旋"退化动态。
-
-### Phase 3 Week D-M2 + Week F（2026-08-27 完成, Phase 3 收官）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **D-M2 家庭申赎闭环** | ✅ | `h.fund_units` 份额登记; 赎回按业绩差放大(≤30%), 现金不足→强平抛售→按份额支付; 动量申购反向。支付额以**实际可付额**封顶 (名义额=无对手方付款的历史 bug 第三次复发, 已在文档固化纪律) |
-| **F 场景库** | ✅ | 新增 stagflation / post_war_recovery / housing_bust → 共 7 个 YAML, 支持 trigger_offsets |
-| **F 验收矩阵** | ✅ | 4 主场景×3种子+2辅助场景×3种子 全部零 SFC 违反 (`test_phase3_acceptance.py`) |
-| **F 明斯基检验** | ⚠️ 冒烟级 | 高低 LTV 对照可运行且无回归, 但当前校准下失业通道未现显著非线性放大 (定量分歧留待 CES 启用后重测) |
-| **F 性能门禁** | ✅ | n=5000 tick 均耗时 <2s 断言入 CI |
-| ~~E2 同业动态化~~ | 挂起 | 前置依赖主银行语义重构; 已从 Phase 3 移出, 与 D-M3 fire-sale 完整版一并重排 |
-
-### Phase 3 Week E 里程碑 1: 供应链 IO（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **E-IO 中间品采购** | ✅ | 下游按 `io_input_shares` 向能源部门采购 (受库存/存款双重约束, 行内科目对冲镜像) |
-| **E-断供传导** | ✅ | 能源产出不足 → `input_utilization<1` → 下游 production() 统一折减 (线性/CES 同口径) |
-| 验收实测 | ✅ | 能源 TFP×0.25 → ≥3/5 下游部门配给约束; 常态下零违反 |
-
-E2 同业网络动态化仍挂起: 主银行语义重构是前置依赖 (多银行账目拆分),
-见 §5 Week E 说明 — 不并入本里程碑虚报完成.
-
-### Phase 3 Week D 里程碑 1: 投行 + 资管 + FSIC 扩展（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **FSIC 扩展** | ✅ | 新增 `InvestmentBankBalanceSheet`(A=L+capital) 与 `AssetManagerBalanceSheet`(A≡L 过账机构); 银行新增 NBFI 存款科目 + 回购债权资产 |
-| **D-InvestmentBank** | ✅ | 自营指数仓位; VaR 目标杠杆 (lev≤k/σ, 波动↑→目标↓ 的 A-Shin 顺周期机制); repo 融资与利息资本化; margin 强平→fire-sale 压价 |
-| **D-AssetManager** | ✅ | 现金缓冲率再平衡: NAV 下跌→提高现金目标→被动抛售压价 (螺旋核); 家庭端申赎接线留下一里程碑 |
-| **SFC 第9项校验** | ✅ | IB+AM 存款 == bank.deposits_from_nbfi; repo 借贷双镜像 (bank.repo_claims == ib.repo_debt) |
-
-**Week D 关键记账教训**:
-1. repo 放贷最初漏记银行侧债权资产 → 放贷创造存款纯增负债, 银行恒等式被击穿
-   (Δ数百). 修法同历史 bug 模式——每个 L 变化必须有 A 或 capital 对手方.
-2. NBFI 与"市场池"的单边交易同样打破银行恒等式 (池子不是账户). 修正为
-   NBFI 与家庭部门直接对手交易 (`_cross_trade_with_households` 双镜像),
-   银行 hh/nbfi 两科目等额对冲零净额.
-3. helper 内 min 截断会造成家庭端实际成交 < 名义额 → 调用方必须用
-   **返回的实际成交额**做镜像, 不能用名义额.
-
-Week D 后续里程碑: 家庭端基金申赎接线 (赎回螺旋闭环);
-i-bank VaR 参数标定到"强平放大冲击 ≥30%"验收; fire-sale 函数完整版统一入口.
-快照 v5.
-
-### Phase 3 Week C 里程碑 3: 交叉持股骨架（2026-08-27 完成）— Week C 收官
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **C-M3a BA 持股图** | ✅ | `network/cross_holdings.py`: 发行人按累计度数加权抽 m_links 个持有人, 划出 β=20% 股数; 无自持 |
-| **C-M3b 双科目记账** | ✅ | FirmBalanceSheet 新增 `stocks`(持有市值) ↔ `minority_equity`(被持负债): 加总恒等 → 部门 NW 不虚增、无双重计算 |
-| **C-M3c 分红含企业股东** | ✅ | 总分红按持股切分家庭/企业两池; 企业股东收款镜像 `deposits_from_firms` |
-
-三层守恒实测: Σ互持==Σ被发; 家庭+企业互持==总供给; 双科目逐位相等.
-`enable_cross_holdings=False` 默认关闭; 经济效应通道 (fire-sale 传染) Week D 接入.
-
-### Phase 3 Week C 里程碑 2: 组合选择 + 波动聚集校准（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **C-M2a risk_tolerance** | ✅ | 家庭风险偏好 ∈[0,1] 截断正态初始化；目标股票权重 w*=0.05+0.40×tol，20%/月向目标迁移 |
-| **C-M2b 过户语义** | ✅ | 再平衡按"家庭间等额配对成交"实现: 总股数守恒、聚合存款不动（否则凭空增减持仓破坏供给守恒） |
-| **C-M2c 波动聚集** | ✅ | 子步 4→12 (日级近似): \|r_t\| 自相关均值 0.31 > 0.1 (三种子)，年化波动 ~30% |
-| **Q9 性能实测** | ✅ | n=300 股市全开 ~7ms/tick，测试上限 250ms |
-
-横截面验收: 高 tolerance 四分位的实际股票权重系统性高于低四分位。
-
-### Phase 3 Week C 里程碑 1: Brock-Hommes 股票市场（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **C-1 BH 引擎** | ✅ | `markets/stocks.py`: 7 条信念规则 + Trader + 做市商出清; 子步循环近似日级 (`stock_substeps_per_month=4`, Q9 性能阀) |
-| **C-2 IPO + 持仓** | ✅ | 企业发行 `shares_outstanding`; 家庭按存款比例认购; 票面价锚 (账面权益≤0 时 `stock_par_price`) |
-| **C-3 分红锚定** | ✅ | `_firm_dividend_cycle` 改按持股分配 → R2 基本面规则有真实股息锚 (`state.last_month_dividends`) |
-| **C-4 SFC 结算** | ✅ | 二级市场只在家庭部门内部轧平: 只结算净流 (deposit↔units 镜像), 估值重估不入账 |
-| 快照 v4 | ✅ | stock_market 序列化含 Trader fitness ndarray |
-
-**关键设计取舍** (记录避免重蹈):
-1. **fitness 从"预测误差"改为"虚拟盈亏"**: 原版只给被选用规则记 −|偏差|,
-   远离价格的基本面规则永远得不到正反馈 → 市场无锚. 虚拟 P&L
-   (`score_k = sign(pred_k−p_old)×r`) 让系统性低估时的买入信号持续积累,
-   价值发现通道才能打开.
-2. **微观数量级需实证标定**: 订单尺寸/深度/λ 的初值差了两个数量级 (价格钉死),
-   直接网格搜索定标: λ=0.40, depth=10, order_fraction=0.15
-   → 年化波动 ~12%, kurtosis 3.2-3.4 (>3 厚尾 ✓), 价格向基本面缓慢收敛.
-
-**Week C 验收实测**: enable_stock_market=True 三种子 48 月:
-零 SFC 违反; 持仓守恒 = 总股数; Σhh.deposits 与银行镜像逐位一致;
-厚尾 kurtosis≥3; 同种子逐位复现; 快照 v4 roundtrip.
-
-~~交叉持股骨架~~ → **M3 已完成**. Week C 全部交付.
-
-### Phase 3 Week B: 劳动市场跨部门流动 + 失业深化（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **B-1 动态劳动需求** | ✅ | `_update_labor_demand`: 目标就业 L*=滞后需求/(A·P)，上下不对称调整 (扩员25%/月、裁员35%/月)；目标下调立即裁员入失业池 |
-| **B-2 疤痕效应** | ✅ | 长期失业 >6 月后每超 1 月再就业工资折扣 1%，封顶 30%；`_scar_discounted_wage` |
-| **B-3 部门份额自洽化** | ✅ | demand_share 与 labor_share 成比例 — 此前 energy (5%/10%) 结构性亏损两个月破产级联 |
-| **G 实物流** | ✅ | 政府购买改为真实市场采购: 抽库存+计入销售额，未成交不付款 |
-| **幻影购买修复** | ✅ | 库存不足时不成交部分退回家中存款；未成交需求记 `firm.last_demand` 作为招聘扩张信号 |
-
-**Week B 关键诊断链** (值得记取的建模教训):
-1. 固定价值份额需求下, "少雇人→供给不足→销售额缩→更少雇人" 死循环 → 多部门 u≈25%。
-2. 加入动态劳动需求后更糟 (单部门 24 月 u→85%): 销售基数只有家庭消费 (mpc(1−τ)<1),
-   **G 凭空注资不入销售账**是塌缩根因 → G 实物流修复。
-3. 仍塌缩: 家庭为无货商品付钱 (幻影购买) 且未成交需求不可见 → 限量成交+退款+
-   `last_demand` 记账, 失业归零。
-4. baseline 因此变成完美稳态 (u≡0) — 奥肯定律改在深度紧缩场景检验。
-
-**Week B 验收实测**: 多部门 + 两轮 55% 深度紧缩, 六个种子全部:
-峰值失业 ~0.8 → 尾段回落 ~0.003 (恢复充分就业), 全程零 SFC 违反。
-旧 Okun xfail (`test_minsky_peak_unemployment`) 在 Week B 动态下已可 XPASS
-(seed 42), 但跨种子不稳定 (7/99 peak≈0.005), 保留 loose xfail 标注。
-
-### Phase 3 Week A: 多部门 + 资本品闭环（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **A-1 多企业列表化** | ✅ | `state.firms: list[Firm]`，`state.firm` 为 `firms[0]` 别名 property；默认单部门行为与 Phase 2 逐位一致 |
-| **A-2 部门参数表** | ✅ | `config.SECTOR_DEFAULTS`: consumer/capital/energy/housing_services/high_tech/services 六部门的劳动份额+需求份额+TFP；`normalized_labor_shares()` / `normalized_demand_shares()` |
-| **A-3 CES 生产函数** | ✅ | `Firm.production_function="ces"`: Y=A·(αK^ρ+(1−α)L^ρ)^(1/ρ)，σ=1 走 Cobb-Douglas 守护；7 个数值单测。默认仍 linear |
-| **A-4 投资实流化** | ✅ | 企业投资向资本品部门真实采购: 买方 deposits−V/capital+V ↔ 卖方 inventory−V/deposits+V，受资本品库存约束；无资本品部门时回退 legacy 实物化路径 |
-| **A-5 编排多企业化** | ✅ | labor(按雇主归属离职/跨企业空缺分配雇佣)、wages、消费需求分流、银行利息/公司税/G 分配、违约处置逐企业执行 |
-| **A-6 快照 v3** | ✅ | 序列化 `firms` 列表，续跑可复现 |
-
-**Week A 过程中发现并修复的记账 bug**:
-- **破产清算存款幽灵**: `declare_bankruptcy` 把清算回收 R 直接记入 firm.deposits
-  却无银行对手方 → 每次破产 Δ≈R 的存款失配（多部门场景放大触发）。
-  修复: 新增 `bank.seized_assets` 科目接收等额清算资产
-  （`seized_assets↑R / deposits_from_firms↑R`, A=L+cap 保持），SFC 校验扩项同步。
-
-**遗留（进 Week B/后续）**:
-- 多部门摩擦失业再平衡偏慢（baseline 失业率 ~10-20%），需 Week B 失业池 +
-  部门再配置机制深化; 当前验收以零 SFC 违反为准
-- CES 未默认启用: 打开后企业对价格的反应会改变 baseline 校准, 留待稳态
-  重校准时一并切换 (§4.1 稳态修复)
-- 中间品 IO 矩阵顺延至 Week A 后半段/Week E (供应链网络), 见 §5
-
-### Phase 3 前置批次 P0-a / P0-b / P0-c（2026-08-27 完成）
-
-| 项 | 状态 | 说明 |
-|---|---|---|
-| **P0-a 消费信贷** | ✅ 脚手架 | `markets/credit.py` + `ConsumerCreditMarket` + `_consumer_credit_cycle` step 函数。DTI 配给规则 + 等额本息还款. `enable_consumer_credit=False` 默认关闭 (验证通过SFC + 字段齐, 待 Phase 3 完整调) |
-| **P0-b 债券市场** | ⚠️ 脚手架, 默认关闭 | `markets/bonds.py` + `_bond_cycle` step 函数. 默认 `enable_bond_market=False` — 内部记账有未解的舍入残差, 不能安全地默认开启. 详见限制清单 #4. |
-| **P0-c 场景库** | ✅ 完整 | 4 个 YAML (`baseline`, `crisis_2008`, `tight_credit`, `loose_credit`) + `scenarios.load_scenario()` 加载器 + 8 个单测. |
-
-### 修复与 SFC 扩项（2026-08-27 一次刷）
-
-1. **REO 修复**: 旧版 `write_off_mortgage` 全额 + `h.housing_units = 0` → 房子人间蒸发. 现以清算折扣 (70%) 回收, 入 `bank.reo_value`, 房屋所有权转移给银行 (`bank.reo_properties`). 新增 ` `校验`  ` 6 项校验之 `validate_housing_stock`.
-2. **SFC 校验扩项**: 1→6 项 (新增家庭负债 / 企业贷款 / 财政部存款 / 住房存量). 之前这些字段都从校验范围之外, 一侧漂移无人察觉.
-3. **多银行初始化**: 移除 `creditor.capital += amount` 的不对称记账 (导致 ±2409 单位 BS 漂移). 主银行持有部门聚合资金流, 外围银行初始 reserves=0, **同业敞口挂起留给 Phase 3 Week E**.
-4. **Rounding 残差**: 1000+ 家庭等比分摊 1e-3 量级数字时产生 <1e-9 累积误差. 现按"最后一人吃下残差"逻辑吸收进银行资本.
-5. **卫生**: config 重复 `n_banks` → 移除; README 状态表 → 更新到 Phase 0-2 完成; 失效 xfail 标记 (`test_log_wealth_approximately_lognormal`) → 删除.
-
-### Phase 0 — 全部完成 ✅
-Day 1-14 计划项全部交付：脚手架、SFC 内核、5 个简化主体、月度 tick、商品/劳动市场、e2e + 性能测试。
-
-### Phase 1 已完成（约 Week 3-7 核心部分）
-
-| 模块 | 内容 | 文件 |
-|---|---|---|
-| RNGManager | 命名流、可复现、reset/spawn | `simulation/rng.py` |
-| 异质性分布 | LogNormal 工资/存款, 截断正态储蓄率/MPC | `utils/distributions.py` |
-| 配置扩展 | Taylor 参数/税率/财政/银行利差/CAR/折旧/卡尔沃/异质性参数 | `config.py` |
-| 完整 Household | 永久收入消费 + 财富效应(λ 可配) + 流动性约束 | `agents/household.py` |
-| 完整 Firm | 折旧 δ、加速器投资、卡尔沃定价(可选) | `agents/firm.py` |
-| 完整 Bank | 政策利率传导存贷定价 + CAR 溢价顺周期 + 利润循环 | `agents/commercial_bank.py` |
-| Government 预算 | 收入税/公司税/G/失业救济; 赤字经 CB 购债融资 | `core/step.py` `_government_cycle` |
-| 通胀预期 | 适应性 + 锚回归 + 脱锚(persistence) | `expectations/inflation.py` |
-| 快照/重放 | JSON 全量序列化 + 恢复后续跑 | `simulation/snapshot.py` |
-| 测试 | +33 个: rng/预期/主体扩展/快照/复现性 | `tests/unit/test_{rng,inflation_expectation,phase1_agents,snapshot}.py` |
-
-### 过程中发现并修复的关键问题
-
-1. **贷款利息资本化破坏银行恒等式**: 企业付不起利息计入债务时，银行资产↑但没有按权责发生制确认收入 → 资本缺口。已修（资本化同时记 income）。
-2. **商品市场定价时序**: 定价在补库存之前执行 → 库存永远"偏低"→ 月月提价 → 通胀螺旋脱锚。已修为月末库存定价。
-3. **工资规则过激**: Phase 0 半年调薪系数 0.5 在充分就业下每半年加薪 50%。改为通胀指数化 + κ=0.10 的菲利普斯斜率。
-4. **财政规模失配**: G 从固定金额改为潜在产出比例(45%)自动定标; 稳态校准 ≈ 1 − avg_mpc×(1−τ)。
-5. **SFC 校验容差**: 绝对 1e-6 在 ~1e4 量级下浮点累积误差误报, 改为相对容差。
-
-### Phase 2 已完成（金融层扩展）
-
-| 模块 | 内容 | 文件 |
-|---|---|---|
-| 房产市场 | 租金锚定价 (cap rate) + 利率反馈 + 泡沫/恐慌因子 | `markets/housing.py` |
-| 抵押贷款 | 初始组合发放、等额月供摊销、断供计数器 → NPL → REO | `core/step.py` `_housing_cycle` / `_mortgage_default_check` |
-| 多家商业银行 | n_banks 可配, 主银行语义, Core-Periphery 同业敞口 | `core/simulation.py`, `network/interbank.py` |
-| Fire-sale 外部性 | REO 甩卖按比例压低房价 → 更多负资产 → 违约螺旋 | `step._fire_sale_and_failure` |
-| 银行失败处置 | CAR 阈值触发 → 同业传染 (recovery 40%) → 政府多轮救助注资 | `step._fire_sale_and_failure` |
-| 危机场景 | 2008 型 preset（风险溢价飙升+紧缩）全链路涌现, SFC 全程干净 | `tests/integration/test_crisis.py` |
-
-**危机涌现验证** (seed=7, n=300, 双重风险溢价飙升 + 财政紧缩 + 加息):
-房价 120→~7 (−95%), 抵押核销发生, bank_1 失败, 同业传染, 政府 TARP 式多轮注资
-稳住系统 (CAR 恢复至监管线), 60 个月零 SFC 违反。
-
-### Phase 2 过程中修复的记账/设计问题
-
-1. **快照恢复后账目分裂**: `state.bank` 与 `state.banks[0]` 被还原成两个对象,
-   新旧代码路径各写一个 → SFC 破裂。已修: 单银行时恢复共享实例; 序列化补齐
-   `housing_market`; snapshot 版本升至 v2。
-2. **多银行聚合代理漂移**: `state.bank` 原为一次性聚合副本, 主循环写入它但校验聚合真银行。
-   已改为"主银行语义": `state.bank = banks[0]`, 聚合视图只在 build_balance_sheets 现场求和。
-3. **LOLR 资本清零无对手方**: `bank.capital = 0` 无对应记账。换成完整镜像的政府救助:
-   gov.debt↑R/gov.other_assets↑R ↔ cb.gov_bonds↑R/cb.bank_reserves↑R ↔ bank.reserves↑R/bank.capital↑R。
-4. **同业违约注销漏记**: 债权人扣资本但债权资产未减、债务人负债未注销。
-   补三边记账 (claims↓X + reserves↓0.4X|cap↓0.6X; debtor: debt↓X|reserves↓0.4X|cap↑0.6X)。
-   银行失败期间同业市场冻结 (停止单边结算)。
-5. **违约触发不可达**: 原"负资产+失业>6月"几乎无法同时满足。新增断供计数器
-   (连续 miss ≥3 月即触发), 经济含义更贴近现实。
-6. **房价初始参数不自洽**: price=200 vs rent 锚定目标 2400 → 必然长期上涨。
-   校准为 price=120, rent=0.5, yield=5% (三者自洽); 新增 `housing_initial_ltv`。
-
-### Phase 1 待办（按计划顺序）
-
-> 三项未交付项已并入 **§5.0 前置批次**，作为 Phase 3 Week A 的前置依赖，那里有完整记账规格。
-
-- [ ] P0-a: Stiglitz-Weiss 消费信贷 + LTV/DTI → §5.0
-- [ ] P0-b: 债券市场 + 私人持债渠道 → §5.0
-- [ ] P0-c: scenarios/*.yaml 场景库 → §5.0
-
-### 已知建模限制（有意简化, 后续修正）
-
-- ~~企业投资不消耗金融资源~~ → **Week A 已关闭**: 存在资本品部门时投资走真实采购
-- ~~部门份额不自洽 / 幻影购买~~ → **Week B 已关闭** (demand=labor shares; 限量成交)
-- **多部门失业动态两极化**: 温和冲击只削超额需求 (classical 区制, 无失业反应);
-  强冲击直接引发破产潮 (u→80%). 缺平滑的中间区制 → Week F 重校准 (CES 启用 +
-  库存缓冲目标化). 当前以" rises-and-falls + 零 SFC 违反"为验收口径
-- **校准 2026-08 新增**: 基线稳态充分就业 (摩擦失业被即时回填掩盖, 匹配
-  函数对自然失业率不可见); 行为性抵押违约级联与银行内生的危机涌现依赖
-  Phase 3.5 行为化 (此前银行失败部分来自机械性利息放血的人造脆弱);
-  Week-C 组合再平衡的横截面梯度需在新稳态下重新校准 (test xfail 已标注)
-- 国债利息默认滚入本金（CB 利润上缴未建模）→ P0-b 部分处理, 剩余项留 Phase 5
-- 存款利率为单一聚合利率（无个体层级差异化）→ 多主体化后继续收敛
-- **多银行同业敞口初始化挂起**: 临时禁用, 留给 Phase 3 Week E 重新设计主银行语义
+> 状态：Phase 0-2 ✅ / Phase 3 ✅ / Phase 4 MVP ✅ / **Phase 3.5 架构收尾 ✅**（PR-1..7 全部完成）
+> 最后更新：2026-09-01
+> 测试基线：439 passed · 1 xfail（组合再平衡横截面梯度，待重校准）· ruff clean · 回归矩阵零 SFC 违反
+> 对应设计：[DESIGN.md](DESIGN.md) + [docs/](docs/)；前端方案 [docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md)
+>
+> 历史里程碑的逐周过程细节（Phase 0-3 逐日/逐周记录、3.5.A-F 实施方案原文）已压缩进本总账，
+> 完整过程见 `git log -- IMPLEMENTATION.md`。
 
 ---
 
-## 0. 阅读指南
+## 0. 进度总账
 
-| 章节 | 内容 | 何时读 |
+### Phase 3.5 — 完整架构收尾（2026-08-28 ~ 09-01，全部完成）
+
+> 动机：多个 xfail 的根因是"架构未收尾"而非"参数未校准"。先把架构全部铺开，最后一次性校准。
+
+| PR | 状态 | 内容 |
 |---|---|---|
-| 1. 指导原则 | 编码哲学（仍然生效） | 开始前 |
-| 2. 现状结构 | 实际代码目录 + Phase 3 装点 | 熟悉代码时 |
-| 3. 测试策略 | 金字塔与原则 | 全程 |
-| 4. 历史存档摘要 | Phase 0-2 的取舍与教训 | 回溯设计动机时 |
-| 5. **Phase 3-5 实施方案** | 前置批次 + 逐周计划 + 记账规格 + 未决问题 |
-| 5b. **前端设计方案** | [FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md): Phase 4 架构/协议/页面 | 进 UI 前 |
-| 6. 关键依赖 | 实现顺序依据 | 调整顺序时 |
-| 7. 附录：早期决策记录 | Q1-Q6 已采纳默认值 | 需要背景时 |
+| PR-1 多部门多家企业 | ✅ | `n_firms_per_sector` 从死代码生效；默认 1 向后兼容（决策：旧默认 50 与 `state.firm` 别名/老测试冲突，改回 1，需多企业时显式设置）；`tests/integration/test_multifirm.py` |
+| PR-2 多银行 init | ✅ | `home_bank_id`（HH+firm，`"bank_assignment"` 命名流一次性分配）+ `market_share`（deposit-weighted）+ `_allocate_share` 工具；14 新测试 |
+| PR-3 多银行 step 拆分 | ✅ | `pay_wages`/`consumption`/`gov_cycle`/`bank_cycle`/`housing`/`default+dividend+mortgage_default` 全部按 `home_bank_id` 镜像；init 同步拆 deposit+reserve+loan+mortgage；单银行保持主银行语义快路径 |
+| PR-4 同业动态化 | ✅ | `InterbankNetwork.rewire()` 季度重连（按 CAR 重排核心）；多银行 init 自动启用网络；`rebalance_reserves` 暂禁用（跨银行 per-bank BS 不平衡，见残留 #4） |
+| PR-5 NBFI 全开 | ✅ | 7 个 flag 默认开 + 5 处 SFC 修复（见 §4 记账规格）；行为验收测试曾钉住各 Phase 模块组合，PR-7 后解除 |
+| PR-6 回归矩阵 | ✅ | `tests/integration/test_regression_matrix.py`：7 场景 × 3 种子 = 63 用例，零 SFC + 矩有限性 + golden 逐位锁定。**行为有意变更时必须显式重采 golden** |
+| PR-7 失真分析 | ✅(第一期) | 供应链冷启动死亡螺旋修复（见 §5 校准记录 #1）；labor/multifirm/multisector/stock 验收测试解除钉住、全开通过 |
 
-> Phase 0/1 的逐日实施细节与初版计划见 git 历史 (`git log -- IMPLEMENTATION.md`)。
+**Phase 3.5 之前的阶段速览**：
+
+| 阶段 | 交付 |
+|---|---|
+| Phase 0 | 脚手架、SFC 内核、5 主体、月度 tick、商品/劳动市场、性能测试 |
+| Phase 1 | RNGManager 命名流、异质性分布、永久收入消费、Taylor 央行、政府预算、通胀预期、快照/重放 |
+| Phase 2 | 房产/抵押/NPL→REO→fire-sale、多银行(主银行语义)+同业敞口、银行失败处置、2008 危机全链路涌现 |
+| Phase 3 | P0-a/b/c 前置(消费贷/债市/场景库)、Week A 多部门+CES+投资实流、Week B 动态劳动需求+疤痕+G 实流、Week C Brock-Hommes+组合选择+交叉持股、Week D 投行+资管+FSIC、Week E-M1 供应链 IO、Week F 场景库扩到 7 个 |
+| Phase 4 MVP | `ui_service/`（只读投影 + 干预网关 + WS）+ `frontend/`（Svelte5 宏观看板 + 部门下钻）；W5 网络视图/W6 场景编辑器延后二期 |
+
+### 当前残留与已知限制（按优先级）
+
+1. **log-wealth 分布再校准**：债券市场默认开后 log-wealth 偏度 -0.83 → -1.1~-1.5。机制：赤字强制家庭认购国债 = 流动性再分配，痛集中在低存款户（需求收缩的收入损失也在底部）。已试"降低家庭认购份额"与"流动性缓冲保护"两个修法均无效，需专项设计（候选项：付息融资/期限结构/财政规则）。校准套件因此仍钉在核心体制。
+2. **stagflation 场景全灭**：场景未配 `sectors` → 默认单企业经济，扛不住能源+工资冲击（HEAD 全关下也死，既有问题）。修法方向：场景 YAML 配多部门。
+3. **冲击对 real_gdp 钝化**：财政/货币冲击通道本身生效（乘数、房价、银行失败均验证），但 real_gdp 几乎不动。HEAD 既有，非 PR-5 回归；与 #1 同属分布/动态再校准课题。
+4. **跨银行 per-bank BS 不平衡**：`rebalance_reserves` 暂禁用（PR-4 遗留）。
+5. **Week-C 组合再平衡横截面梯度**：高偏好群体受现金/供给双约束，xfail 标注中。
+6. 其他既有简化：CB 持债利息滚入本金（利润上缴部分建模）；存款单一聚合利率；同业敞口 init 挂起项已由 PR-4 关闭。
 
 ---
 
 ## 1. 指导原则
 
-### 1.1 编码哲学
-
 | 原则 | 说明 |
 |---|---|
-| **SFC 优先** | 任何涉及金钱流动的代码必须经过 SFC 校验。校验是地基，不能事后补。 |
-| **可复现优先** | 每个随机数来自 `RNGManager` 命名流。任何"魔术常量"必须配置化。 |
-| **接口稳定** | 先定义抽象接口（Protocol/ABC），后写实现。便于替换和测试。 |
-| **写测试** | 测试不是事后补——Phase 0 第一个任务就是建测试框架。 |
-| **数据契约** | 跨模块数据用 `dataclass` + 类型注解。Polars DataFrame 用于跨主体聚合。 |
-| **配置驱动** | 所有参数（CAR 阈值、折旧率、Taylor 系数等）从 YAML/JSON 读，不写死在代码里。 |
+| **SFC 优先** | 任何资金流必须双边镜像记账，经 `monetary/sfc.py` 校验。校验是地基，不能事后补 |
+| **可复现优先** | 随机数一律走 `RNGManager` 命名流；魔术常量一律配置化 |
+| **聚合代理一律不用** | 只允许"现场求和视图"（`build_balance_sheets`）或真实主体本体，不维护会漂移的副本 |
+| **配置驱动** | 参数从 SimConfig/YAML 读，不写死代码 |
+| **一次只动一组参数** | 校准顺序：结构性（份额/弹性）→ 行为性（MPC/风险偏好）→ 政策规则最后 |
 
-### 1.2 优先级
+反模式（禁止）：无 SFC 校验的资金流合并进 main；`np.random.random()` 等无命名 RNG；`step()` 内 `print()`；硬编码参数。
 
-> 如果时间不够，**先做对的不做多的**。
-
-优先级排序：
-1. ✅ SFC 校验工作
-2. ✅ 月度主循环跑通
-3. ✅ 1-2 个核心反馈环（如货币 → 信贷 → 实体）
-4. ⚠️ 异质性 / 异质信念（Brock-Hommes）
-5. ⚠️ 复杂市场（房产、外汇）
-6. ❌ UI / 可视化（Phase 4）
-7. ❌ 性能优化（Phase 2+）
-
-### 1.3 反模式（禁止事项）
-
-- ❌ 在 Phase 0 加房产市场
-- ❌ 在 Phase 0 用 Brock-Hommes（用静态预期替代）
-- ❌ 把"无 SFC 校验"的代码合并到 main
-- ❌ 用 `np.random.random()` 等无命名 RNG
-- ❌ 在 `step()` 函数里写打印语句（用 logging）
-- ❌ 把硬编码参数散落在代码里
-
----
-
-## 2. 现状结构（实际目录）
+## 2. 现状结构
 
 ```
-FinancialSim/
-├── DESIGN.md / docs/*.md        # 设计文档
-├── IMPLEMENTATION.md            # 本文件
-├── pyproject.toml               # 依赖 + ruff/pytest 配置
-├── .github/workflows/calibration.yml
-├── financial_sim/
-│   ├── config.py                # SimConfig (pydantic): Taylor/财政/银行/CAR/异质性/房产/多银行参数
-│   ├── core/
-│   │   ├── simulation.py        # Simulation: 构建 SFC-balanced 初始态 + run/step
-│   │   ├── state.py             # SimulationState + build_balance_sheets() 现场聚合
-│   │   └── step.py              # monthly_tick 编排(全部记账镜像所在, ~800 行核心)
-│   ├── agents/                  # household / firm / commercial_bank / government / central_bank
-│   ├── markets/                 # goods / labor / housing
-│   ├── monetary/                # balance_sheets(5类) / sfc(相对容差校验器)
-│   ├── expectations/inflation.py# 适应性 + 锚定 + 脱锚
-│   ├── network/interbank.py     # 同业敞口(静态; Phase 3 Week E 动态化)
-│   ├── simulation/              # rng(RNGManager) / events(ShockEvent) / snapshot(v2 JSON)
-│   └── utils/                   # distributions / logging / paths
-├── tests/{unit,integration,calibration}/
-├── scenarios/                   # (空) Phase 3 前置批次 P0-c 填充
-└── reports/
+financial_sim/
+  config.py                 # SimConfig (pydantic): 全部参数 (7 个 NBFI flag 默认开)
+  core/                     # simulation / state / step (tick 编排, 全部记账镜像所在)
+  agents/                   # household / firm / commercial_bank / government / central_bank
+  markets/                  # goods / labor / housing / credit / bonds / stocks
+  monetary/                 # balance_sheets (7 类 BS) / sfc (校验器, 相对容差)
+  expectations/             # 通胀预期 (适应性+锚定+脱锚)
+  network/                  # interbank (动态 rewire) / cross_holdings
+  simulation/               # rng / events (ShockEvent) / snapshot (v5 JSON)
+  ui_service/               # FastAPI: registry + projection + main (只读投影+干预网关)
+  scenarios.py              # YAML 场景加载 → (SimConfig, EventManager)
+frontend/                   # Svelte 5 + TS + Vite + ECharts
+scenarios/                  # 7 个 YAML (baseline / crisis_2008 / stagflation / ...)
+tests/{unit,integration,calibration}/
 ```
-
-Phase 3 新增模块落点见 §5 各周计划。
-
----
 
 ## 3. 测试策略
 
 ```
-                校准测试  ←─ 蒙特卡洛 (tests/calibration/stylized facts)
-                    │
-                e2e/集成  ←─ 危机涌现、baseline 稳定性 (tests/integration/)
-                    │
-                单元测试  ←─ 记账、行为函数、边界值 (tests/unit/, 190+ 个)
+校准测试   ← 蒙特卡洛 stylized facts (tests/calibration/, 钉在核心体制)
+集成/e2e   ← 回归矩阵、危机涌现、UI API (tests/integration/)
+单元测试   ← 记账、行为函数、边界值 (tests/unit/)
 ```
 
 | 原则 | 说明 |
 |---|---|
-| **每个 SFC 校验有负向测试** | 故意制造违反，验证能捕获 |
-| **每个跨部门资金流双边镜像** | 写新 step 函数前先写分录规格; 配对两侧用同一数值变量 |
-| **每个数学公式有数值验证** | 已知输入 → 容差内输出 |
-| **每个行为规则有边界测试** | CAR=0、完全失业、零库存不崩溃 |
-| **场景×种子回归门禁** | baseline 与 crisis 场景在 CI 全绿，违即停 |
+| 每个 SFC 校验有负向测试 | 故意构造违反，验证能捕获 |
+| 每个跨部门资金流双边镜像 | 写 step 函数前先写分录规格；配对两侧用同一数值变量 |
+| 场景×种子回归门禁 | `test_regression_matrix.py` golden 锁定 + CI 的 baseline/crisis 门禁 |
+| golden 变更纪律 | 行为有意变更 → 重采 golden 并在 commit message 说明；意外漂移 = bug |
 
----
+## 4. 记账规格与教训（改资金流前必读）
 
-## 4. 历史存档摘要（Phase 0-2 取舍与教训）
+**所有 SFC 记账 bug 都是同一类错误：一侧变动没有对手方。** 已知复发模式与对应规格：
 
-详细过程见 git log；此处只留影响后续设计的结论：
-
-1. **SFC 记账 bug 都源自同一类错误**: 一侧变动没有对手方（利息资本化漏记收入、LOLR 抹平资本、
-   同业违约单边核销、快照别名分裂）。对策已制度化为 §3 原则与 §5 各周的"开工前写死分录规格"。
-2. **定价/工资规则必须先校准稳态**: 半年调薪系数 0.5 与房价初始价偏离锚都曾造成爆炸;
-   任何行为方程上线前先验证 baseline 60 月价格平稳。
-3. **聚合代理对象一律不用**: 只允许"现场求和视图"(build_balance_sheets) 或真实主体本体,
-   不维护会漂移的副本。
-4. **违约通道必须经济可达**: 触发条件要对应真实压力路径 (断供计数 > 失业时长组合),
-   否则机制写了等于没写。
-
----
-
-## 5. Phase 3-5 实施方案
-
-> 本节为详细实施计划（2026-08-27 制定），替代原概览。写作时基准：
-> Phase 0-2 已完成（199 测试全绿，危机涌现验证通过），
-> 现有资产：housing/mortgage、多银行(主银行语义)、同业敞口(静态)、事件系统、快照 v2、校准套件雏形。
-> 编排原则沿用 §1：SFC 优先——每个模块开工前先写死"双边记账规格"，负向测试随代码提交。
-
-### 4.1 稳态修复尝试（2026-08-27, 未根治, 仅作工具脚手架）
-
-**问题诊断** (120 月 baseline 跑):
-- 政策利率被通胀推至 100%+ 或贴 floor (−0.005)
-- gov debt 线性发散
-- 失业率 (1-2%) ≪ NAIRU (5%) — 失业机制弱
-- 校准套件 7 项 stylized facts 中 6 项 "pseudo-passing" (断言被放宽到任意常数 / xfail / skip)
-
-**根因**: 不是单一 bug, 而是三个相互放大的结构性缺陷:
-1. **生产函数不响应价格**: `production = productivity × employees` 与价格脱钩 → 库存耗尽时无法扩产 → 价格阶梯 (5%/月) 单调上升
-2. **价格规则离散且无上界**: 库存耗尽时按 5% 步长提价, 累计 11 个月到 71% YoY; Taylor rule 又以更高利率反击 → 恶性循环
-3. **财政失衡 (G = 0.45 × potential_gdp, T ≈ 0.25 × wage_bill)**: 18% 永久赤字 → CB 货币化 → 银行资本单调增长 → 没有退出阀
-
-**修复尝试与产出**:
-- ✅ 工具脚手架: `_bank_dividend_cycle(state)` 在 `step.py` 中定义 (账面转移: `bank.capital ↓D ↔ bank.deposits_from_hh ↑D ↔ h.deposits ↑D`), SFC 平衡已验证, 后续 Phase 3 Week A 调通生产函数后只需 `monthly_tick` 中插入一行调用即可开启
-- ✅ 工具脚手架: `config.wealth_effect_coef` 默认 0, 留作 Phase 3 调参用
-- ⚠️ `_government_cycle` 中 G 实物化的尝试 (按当前价格扣 `firm.inventory`) 在调用顺序上无法闭环 (G 在 `_household_consumption` 之后跑), 单方面改进会破坏其他机制 (已撤回)
-- ❌ 完整稳态无法仅通过调参实现 — 必须重写生产函数 + 价格规则 (Phase 3 Week A 范畴)
-
-**承诺给 Phase 3 Week A 的接入点**:
-1. `_bank_dividend_cycle(state)` 已 ready, 一行插入 `monthly_tick` 即可激活
-2. `enable_bank_dividends=True` 已为默认, `bank_dividend_car_target=0.10` 已调
-3. `_bond_cycle` 默认 OFF 的 bug 已修 (原本即使 config flag 为 False, 函数内默认参数也会让它运行 — 已统一为 False)
-
-### 5.0 前置批次：P1/P2 遗留 + 记账债务清偿（约 2 周，Phase 3 Week A 前必须完成）
-
-原 Phase 1 Week 5-6 有三项未交付，且它们恰好是 Phase 3 的依赖项，按依赖顺序先行：
-
-| 序 | 模块 | 为什么是前置 | 关键文件 |
-|---|---|---|---|
-| P0-a | **消费信贷市场**（Stiglitz-Weiss 配给 + LTV/DTI） | 资管/投行的对手方是负债家庭；信贷配给逻辑会被企业融资复用 | `markets/credit.py`, `step._consumer_credit_cycle` |
-| P0-b | **债券市场**（期限结构 + 私人部门持债渠道） | 关闭"财政赤字 100% CB 承接"的建模限制；投行自营盘需要国债头寸 | `markets/bonds.py`, `step._bond_cycle` (⚠️ 默认关闭, 舍入未解) |
-| P0-c | **场景库**（scenarios/*.yaml + loader 测试） | 危机场景目前写死在测试里；Phase 3 每个里程碑都用场景验收 | `scenarios/*.yaml`, `financial_sim/scenarios.py` |
-
-**P0-b 记账规格（预先钉死）**:
-- 政府增设 treasury 存款账户（`GovernmentBalanceSheet.treasury_deposits` 字段已存在但从未使用）
-- 发债: HH/银行存款 −X ↔ 各自 bonds 持有 ↑X; treasury_deposits ↑X ↔ CB 或银行的对应资产调整
-- 国债利息以现金支付（经 treasury），CB 持有部分的利息保留"滚入本金"简化并写入文档
-- 新增 SFC 校验第 6/7 项: 债券持有 = 发行；treasury 存款与 CB 负债一致
-- 验收: tight_credit / baseline 双场景 24 月零违反
-
----
-
-### Phase 3：完整经济（计划 6 周）
-
-> 目标: 从"单聚合企业的玩具经济"升级为多部门多主体经济；
-> 清偿全部已知建模限制；每个里程碑用一个 YAML 场景验收。
-
-#### Week A: 多部门 + 资本品闭环（消解限制 #1）
-
-| 内容 | 说明 |
-|---|---|
-| 6 部门 firms 列表化 | consumer/capital/energy/housing_serv/high_tech/services；`state.firms: list[Firm]`，逐部门 `GoodsMarket` 实例 |
-| CES 生产函数 | Y = A·(α_K·K^ρ + α_L·L^ρ + α_E·E^ρ + α_M·M^ρ)^(1/ρ)，ρ 由 σ=1/(1−ρ) 标定；先用 stylized 参数表 |
-| 中间品投入 M | 供应链矩阵 IO(sector_i→sector_j) 驱动；这是供应链网络的记账前身 |
-| **投资实流化** | 企业投资改为向 capital_goods 部门真实采购: 买方 deposits ↓I ↔ 卖方 deposits ↑I（银行两侧镜像）；折旧不变 |
-
-SFC 注记: 这是历史 bug 高发区。规格:任何 I 的分子分母必须同时出现在买卖两家银行账本
-（同一家银行则只动 deposits_from_firms 内部一笔）。采购资金不足时走信贷市场（Week C 接入）。
-验收: 多部门 baseline 36 月零违反；投资与资本品部门营收恒等。
-
-#### Week B: 劳动市场跨部门流动 + 失业深化
-
-| 内容 | 说明 |
-|---|---|
-| 失业池机制 | households 按部门搜索工作；搜寻强度 × 保留工资（现状: 单一雇主雇佣所有人） |
-| 工资方程完整版 | w_t = w_{t−1}·(预期通胀指数化 + κ·失业缺口)，加长期失业疤痕效应折扣 |
-| 部门间再配置 | 收缩部门裁员 → 池 → 扩张部门招聘；招聘命中率 = f(总需求) |
-
-验收: 紧缩场景下失业率能到 8%+ 且回落；Okun 系数量级合理。
-
-#### Week C: 股票市场（Brock-Hommes）+ 交叉持股
-
-| 内容 | 说明 |
-|---|---|
-| Trader 类 + 7 规则 | beliefs/fitness/softmax 适应；日级子循环独立 RNG 流 `'stocks'` |
-| 公司股权发行 | Firm 增加 shares/equity 账户；IPO 把银行贷款置换为股权（资产负债表重组，不动货币总量） |
-| 家庭组合选择 | risk_tolerance 驱动 存款↔股票 配置（SFC: 存款在家庭间转移） |
-| 交叉持股骨架 | Scale-Free 图上 firms 相互持股；市值核算进 BS 的 stocks 字段（通用 BS 类已支持） |
-
-SFC 注记: 股价波动本身不入账（估值重估）；只有交易清算动存款。**严禁把浮盈变成购买力**
-——2008 教训已写入 test_crisis。验收: 波动聚集 autocorr > 0.1（并入校准套件）。
-
-#### Week D: 投资银行 + 资管
-
-| 内容 | 说明 |
-|---|---|
-| InvestmentBank | 自营股票/国债头寸、VaR 风控、回购融资杠杆、fire-sale 函数完整版 |
-| AssetManager | 代理家庭持仓、赎回→被动抛售→净值下跌→更多赎回（赎回螺旋） |
-| FSIC 扩展 | BS 类新增两个部门的资本追踪型表（A=L+capital 模式） |
-
-SFC 注记: 回购 = 以证券质押借入现金，记: 资产端 cash↑ / 负债端 repo↑，抵押品做表外登记；
-强平双向镜像。验收: 杠杆冲击场景下资管赎回螺旋 + i-bank fire-sale 能把房价/股价冲击
-放大 ≥30%（对照无 i-bank 场景）。
-
-#### Week E: 网络动态化
-
-| 内容 | 说明 |
-|---|---|
-| 同业网络重连 | 静态敞口 → 每季 Core-Periphery 重连（额度受 CAR 约束）；替换现"冻结"补丁 |
-| 供应链网络成型 | 分层树 + 少量交叉；断供传导 = 上游减产 → 下游 M 缺口 → CES 产量下调 |
-| 外资桩（可选，Q11） | 简单外汇占款账户；不做汇率内生 |
-
-#### Week F: 场景库扩充 + 明斯基验证
-
-2008 / 滞胀 / 战后复苏 / 房产泡沫破裂 四场景 YAML 化（含 trigger_offsets 编排）；
-明斯基时刻检验: 内生杠杆积累 → 微小外生冲击触发非线性崩塌（对比不同初始杠杆）。
-
-**Phase 3 验收标准**: ① 全部四场景零 SFC 违反（蒙特卡洛 10 种子×4 场景）;
-② 性能: n_households=5000, 12 firms × 6 部门, P95 tick < 2s; ③ stylized facts 从 7 项扩到
-10 项全过; ④ 限制清单(#1 投资资源/#2 财政承接)正式关闭并从文档移除。
-
----
-
-### Phase 4：教学层（计划 6 周）
-
-> 设计方案已定稿：[docs/FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md)
-> （技术栈 FastAPI + Svelte 5 + ECharts/D3；四层下钻；干预即 ShockEvent）
-> 本节为实现计划（里程碑按依赖排序，每项含验收）。
-> **MVP 边界（已决策）**: 实验模式看板+干预为主轴（W1-W4 全量, W5 降级为可选）;
-> 单机自用; 中文直出; 场景编辑器(W6 前半)与教程课程(W6 后半)整体延后二期.
-
-#### W3-W4 实测修复记录（首次人工走查发现）
-1. **空白页**: 头部误用 `if={$meta}` 属性(非 Svelte 指令), meta 为 null 时
-   内部表达式求值抛 TypeError → 组件挂载失败整页空白. 修为 `{#if $meta}`.
-2. **导航按钮静默丢失**: 无断言的字符串替换脚本让"部门下钻"入口从未插入,
-   AgentsView 编译进包但永远不可达 → 教训: 补丁必须 assert 替换次数.
-3. **runes 模式陷阱**: AgentsView 引入 `$derived` 后整组件进入 runes 模式,
-   普通 `let` 失去响应性 → 表格永远空. 状态全部改 `$state`.
-4. e2e 冒烟固化: `frontend/tests/e2e_smoke.py`(新建→曲线→干预→下钻→日志,
-   headless 断言零页面错误).
-
-#### W3 — Svelte L1 宏观看板 ✅（2026-08-27）
-交付: `frontend/` (Svelte5+TS+Vite+ECharts); tickStore(WS 实时+REST 补数);
-MacroChart 双轴时序+冲击 markLine; 实验模式看板中文直出.
-端到端实测: 真 uvicorn 下建仿真 speed=10 → 51 tick 时序 served.
-工具链坑: rolldown 要求 `.svelte` 导入写全扩展名.
-
-#### W4 — L2/L3 部门下钻 ✅（2026-08-27）
-交付: AgentsView 组件 — 企业/银行 Tab 表格 (员工/价格/CAR/状态), 点击行
-展开 L3 资产负债表三栏视图(资产|负债+资本|净值指标). 看板导航切换.
-MVP 主链路闭环: 场景→仿真→宏观曲线→干预→审计→部门下钻.
-
-#### W1 — API 骨架 + 只读投影 ✅（2026-08-27）
-交付: `financial_sim/ui_service/`(registry/projection/main) + fastapi/uvicorn/httpx2 依赖.
-端点: POST/GET/DELETE `/api/sims`、`command`(speed/step)、`series`、
-`agents/{firms|banks}`、`agent/{sector}/{id}`、WS `/api/sims/{id}/ws`
-(tick 帧 + set_speed/pause/step/run_to 上行命令).
-帧标签语义已固化测试: macro_history 在 t 自增前写入 → 跑 N 步快照标签 0..N-1.
-
-#### W2 — 干预网关（唯一写通道） ✅（2026-08-27）
-交付: `POST interventions`(preset 或自定义 channel+magnitude+offset,
-pydantic 校验→ShockEvent 注入 EventManager); GET interventions 只读审计;
-可复现性回归测试(同 seed 同干预逐位一致). 非法预设/量级 422 不入账.
-16 个 UI API 测试 (`tests/integration/test_ui_api.py`).
-
-#### W3 — Svelte SPA: L1 宏观看板
-| 内容 | 说明 |
-|---|---|
-| 脚手架 | Vite+Svelte5+TS; tickStore/metaStore; ECharts MacroChart |
-| 断线恢复 | last_t 补数(series?from=) + WS 重订阅 |
-验收: Playwright 冒烟①——加载→自动跑→图表出线→暂停可用.
-
-#### W4 — L2/L3 部门下钻 + 单主体资产负债表
-| 内容 | 说明 |
-|---|---|
-| 列表页 | 家庭分位数视图/企业/银行/政府/NBFI Tab + sparkline |
-| 详情页 | 左右分栏 BS + 科目 12 月走势; 家庭按 id 搜索 |
-验收: 任一主体可从 L2 两跳内到达其资产负债表; 数字与 L1 时序一致.
-
-#### W5 — L4 网络三视图 ⏸（MVP 外, 可选后置）
-| 内容 | 说明 |
-|---|---|
-| D3 force | interbank(骨架期显示静态拓扑)/供应链(断供灰化闪烁)/交叉持股 |
-| 数据 | GET network/{view}?t= 边表投影 |
-验收: 危机场景下能肉眼看到失败银行节点与断供传播时序.
-注: 同业动态敞口依赖 Phase 3.5 E2, 图层先行用骨架数据源.
-
-#### W6 — 场景编辑器 + 教程课程 ⏸（延后二期）
-| 内容 | 说明 |
-|---|---|
-| 编辑器 | SimConfig JSON Schema 表单 + 冲击编排器(PRESET_SHOCKS×offsets 时间轴) |
-| 导出 | 保存为 scenarios/*.yaml 兼容格式 |
-| 三门教程 | 《通胀来了》《金融危机》《供给冲击》: 固定 seed+脚本化干预+预期现象核对卡 |
-(MVP 完成定义调整: W1-W4 全绿即为可用版本——加载场景→跑→宏观曲线→
-注入冲击→shock_log 审计闭环. W5/W6 迁出 MVP.)
-工程约束全程生效: UI 层零科学计算.
-
----
-
-## Phase 3.5 — 完整架构收尾(2026-08-28 起)
-
-> **动机**: 当前 5 个 xfail 中有 4 个根因是"架构未收尾"而非"参数未校准":
-> 多银行真拆分缺位 → 同业敞口失效; 多企业死代码 → 部门内无竞争;
-> NBFI 7 个 flag 默认关 → 集成路径未验证. 直接调参会随每次架构改动
-> 反复失效,所以**先把架构全部铺开,最后一次性校准**。
-
-### 3.5.0 — 状态看板 (2026-08-28)
-
-| 子项 | 状态 | 内容 |
+| # | 模式 | 规格要点 |
 |---|---|---|
-| 行为化抵押违约级联 | ✅ | 连续 6 月负资产 → 违约; `tests/integration/test_crisis.py` 2 xfail 已解锁 |
-| 企业按生产融资 | ✅ | `firm_working_capital_factor`: 工资单 × factor 决定借款; `tests/calibration/test_stylized_facts.py::TestBankProCyclicality` 已通过 |
-| Minsky 失业螺旋 | ✅ | `labor_adjust_down_speed` 0.06→0.20,`labor_matching_efficiency` 0.50→0.30; `TestCrisisEmergence::test_minsky_peak_unemployment` 已通过 |
-| **PR-1** 多部门多家企业 | ✅ | `n_firms_per_sector` 从死代码生效; 默认 = 1 向后兼容; 9 新测试; `tests/integration/test_multifirm.py` |
-| **PR-2** 多银行 init | ✅ | `home_bank_id` (HH + firm) + `market_share` (deposit-weighted) + `_allocate_share` 工具; 14 新测试; `tests/integration/test_multibank_init.py` |
-| **PR-3** 多银行 step.py 拆分 | ✅ | PR-3a `pay_wages` / 3b `consumption` / 3c `gov_cycle` / 3d `bank_cycle` / 3e `housing` / 3f `default + dividend + mortgage_default` — 全部按 firm/HH 的 `home_bank_id` 镜像; PR-2 init 同步拆 deposit + reserve + loan + mortgage; 单银行维持主银行语义快路径 |
-| **PR-4** 同业动态化 | ✅ | `InterbankNetwork.rewire()` 季度重连 (按 CAR 重排核心); 多银行 init 自动启用网络; `_interbank_cycle` 集成 rewire; `rebalance_reserves` 暂禁用 (跨银行 per-bank BS 不平衡已知,留 PR-4+); 11 新测试 |
-| **PR-5** NBFI 全开验证 | ✅ | 7 个 flag 默认开 + SFC 修复: ① `_bond_cycle` CB 持债只按银行份额 `bank_amt` 入账 (全额入账与 hh 持债双计); ② hh 买债/收息补银行准备金镜像; ③ CB 持债利息按"利润上缴"净零处理 (原错付给商业银行准备金); ④ IB 强平抛售改走 `_cross_trade_with_households` 真实成交 (原凭空记现金+单位消失,银行 BS 违反); ⑤ `simulation.py` 股票关+交叉持股开的 `cross_edges` UnboundLocal; Phase 行为/校准验收测试显式钉住各 Phase 模块组合, 全开动态的矩再校准留 PR-7 |
-| **PR-6** 完整回归矩阵 | ✅ | `tests/integration/test_regression_matrix.py` 7 场景 × 3 种子 = 63 用例: 零 SFC + 关键矩有限性 + golden 逐位锁定 (PR-5 全开体制基线) |
-| **PR-7** 失真分析与调参 | ✅(第一期) | 供应链冷启动死亡螺旋修复: ① `io_warmup_months=12` 预热期 (供应商初始零库存, 首拍产出即被砍 → 实测 300 户首拍 u 40%); ② 产出折减按 IO 成本份额加权 `eff_util = 1 − share×(1−util)` (原硬折减使 10% 投入缺口瞬间清零产出, t=12 预热结束即 u 89%); Firm 新增 `io_input_share` 字段. 效果: 300 户全开 u_end 0.42→0, gdp 112→325; labor/multifirm/multisector/stock 验收测试全部解除钉住 (全开通过). 残留 (后续期): log-wealth 偏度全开下 -1.1~-1.5 (债券强制融资流动性再分配, 校准套件仍钉核心体制); stagflation 单企业经济全灭 (HEAD 既有, 场景待配多部门); 冲击对 real_gdp 钝化 (HEAD 既有, 非 PR-5 回归) |
+| 1 | 债券发行/付息（`_bond_cycle`） | CB 持债只按实际承接的银行份额 `bank_amt` 入账（全额入账与 hh 持债双计）；hh 买债/收息必须镜像银行准备金（`bank.reserves` ↔ `cb.bank_reserves`）；CB 自持部分利息按"利润上缴"净零处理，不能走银行分支 |
+| 2 | NBFI 与市场交易 | "市场池"不是账户——NBFI 必须与家庭部门直接对手成交（`_cross_trade_with_households` 双镜像）；强平/抛售同理，凭空记现金 = 银行 BS 违反 |
+| 3 | 成交额截断 | helper 内 min 截断使实际成交 < 名义额 → 调用方必须用**返回的实际成交额**做镜像，不能用名义额 |
+| 4 | 利息资本化 | 资本化的同时必须记收入（银行 A↑ 无 income → 资本缺口） |
+| 5 | 破产/违约核销 | 债权资产减记必须有对手方（seized_assets / recovery 现金 / 资本冲减三边平衡） |
+| 6 | 估值重估不入账 | 股价/房价波动本身不动存款；只有交易清算动账。严禁把浮盈变成购买力 |
+| 7 | 双重融资 | 同一笔赤字只走一条融资通道（教训见残留 #1：货币化+私人认购并行 = 对家庭变相抽税） |
 
-测试基线 (PR-2 完成): 365 passed · 1 xfail (`test_rebalance_tolerant_households_hold_more`) · ruff clean · 0 SFC violation.
+历史 bug 清单（Phase 0-2 已修复，详见 git log）：利息资本化漏记收入、LOLR 抹平资本、同业违约单边核销、快照别名分裂（bank vs banks[0]）、破产清算存款幽灵、REO 凭空蒸发、幻影购买、G 凭空注资不入销售账。
 
-**PR-1 决策**: `n_firms_per_sector` 默认改回 1 (而非 50) — 旧 50 是文档化的"未来默认",但与 `state.firm` 单数别名 / 6 个老测试假设单企业冲突。改回 1 保持向后兼容,需要多企业时显式设置 `n_firms_per_sector≥2`。
+## 5. 校准与验证
 
-**PR-2 决策**: `home_bank_id` 随机分配策略 — 每个 HH/firm 用 `"bank_assignment"` 命名 RNG 流在 init 时一次性分配,期间不变。`market_share` 反映 HH deposit-weighted 实际份额(非均匀)。下一步 PR-3 step.py 拆分时按 `market_share` 调用 `_allocate_share`。
+### 校准记录（一次只动一组参数）
 
-### 3.5.A — 多部门多家企业(同部门内同质)
+**#1 供应链冷启动死亡螺旋（PR-7 第一期, 2026-09-01）**
+- 原值/症状：300 户全开经济首拍 u 40%（供应商零库存 → util=0 → 产出全额折减）；t=12 预热概念引入前 u_max 0.89
+- 改动：① `io_warmup_months=12`（预热期照常采购但不折减产出）；② 产出折减按 IO 成本份额加权 `eff_util = 1 − share×(1−util)`（原 `eff_a = A×util` 硬折减使 10% 投入缺口清零产出）；Firm 新增 `io_input_share`
+- 效果：u_end 0.42→0.00，gdp 112→325（全关基准 349）；labor/multifirm/multisector/stock 验收全开通过
+- 副作用监测：回归矩阵 golden 无漂移（场景经济为单部门，无 IO 约束路径）
 
-**当前失真**:`config.n_firms_per_sector` 是死字段 — `simulation._build_state` 第 100-136 行只对 `sectors` 创建 1 家/sector, 忽略 `n_firms_per_sector`。`tests/conftest.py:30` 设了 `n_firms_per_sector=2` 但无效果。
-
-**目标**:`SimConfig(n_firms_per_sector=3, sectors=['consumer_goods'])` 应真实创建 3 家 consumer_goods 企业(同质: productivity/wage/calvo 一致, 仅 firm.id 不同)。
-
-**改动范围**:
-- `financial_sim/core/simulation.py:_build_state`: sector 内循环 `for fi in range(n_firms_per_sector)`, 工资/员工均分
-- `financial_sim/markets/labor.py:_frictional_hire`: 部门内多家按 vacancies 比例分配新员工(已有 `vacancies_per_firm` 字典结构, 只需确保同部门多键)
-- `financial_sim/core/simulation.py`: 初始化时按部门总员工数切分到多家(`allocated_emp` 现已存在, 需细分到 firm 索引)
-- SFC: 每家 firm 独立 BS 字段(已存在); 银行聚合 `loans_to_firms` `deposits_from_firms` 求和(`build_balance_sheets` 已实现)
-
-**测试**:
-- 新增 `tests/integration/test_multifirm.py`: 验证 `len(state.firms) == sum(n_firms_per_sector for s in sectors)`
-- 新增负向: 不同 sector 的 firm 不混; 同 sector firm 行为一致
-
-**风险**: 中 — 改 init 路径, ~5-10 行。SFC 影响: 银行聚合无变化(已实现求和)。
-
-**回归影响**: 校准值(基线)会因 firm 数变而漂移, 留给 3.5.F 一次性校准。
-
-### 3.5.B — 多银行真拆分(主银行语义 → 真账户拆分)
-
-**当前失真**:`state.bank == state.banks[0]` (主银行语义), 100+ 处 `bank.xxx` 镜像只走 `banks[0]`, `interbank_network=None`。`n_banks>1` 时同部门聚合流只入主银行, 外围银行 `reserves=0` 是空账户, 同业敞口失效。
-
-**目标**:`SimConfig(n_banks>=2)` 时:
-1. 每家银行持有真实份额的部门存款/贷款(初始按 `market_share = initial_deposits_i / Σinitial_deposits` 分配)
-2. 部门流(工资/消费/税收/G)按 `market_share` 拆分到各银行
-3. 每家银行独立 `set_rates` + 计息(可异质的存款/贷款利率)
-4. 多银行时 `interbank_network` 真初始化 + 储备再平衡
-
-**改动范围** (step.py, 估 30 处):
-- `_pay_wages`: 工资 `bank.deposits_from_firms -=` 按 share 拆分
-- `_household_consumption`: 消费同
-- `_bank_cycle`: per-bank `set_rates()` + per-bank 利息入对应 bank.capital
-- `_government_cycle`: 税收/G/TR 按 share 拆分
-- `_housing_cycle`: 月供走持有 mortgage 的银行(每 HH 初始随机分配银行)
-- `_consumer_credit_cycle`: 消费贷申请落到具体银行
-- `_default_resolution`: 核销走 firm 所属银行
-- `_dividend_cycle`: 股息按持股银行归属
-- `_pay_wages` 中的 `bank.deposits_from_nbfi` 也按 share 拆分
-- `_interbank_cycle`: 重写为真双向 + 储备再平衡
-- 新增 `_allocate_share(amount, banks, key)` 工具: 按 `market_share` 分摊金额到各银行, 残差给最后一家(SFC 逐位相等)
-
-**保留优化路径**:`n_banks=1` 仍走单银行主银行语义(快路径, 旧测试不退化); `n_banks>=2` 走真拆分。
-
-**测试**:
-- 重写 `tests/integration/test_multibank_baseline_no_violation`: 加严 — 验证每家银行 BS 独立干净, 不只是聚合
-- 新增 `tests/integration/test_multibank_consumption_split`: 验证消费按 share 拆分
-- 新增 `tests/integration/test_multibank_consistent_with_singlebank`: n_banks=1 与 n_banks=2 (合并 share) 总账逐位相等
-
-**风险**: **高** — 浮点尾差需容差处理, 可能暴露既有 SFC bug。建议分 PR 拆批: A → B-init → B-cycle → B-crisis。
-
-**回归影响**: 多银行测试必须 SFC 干净; 多银行场景下家庭/企业总账必须 ≈ 单银行聚合(浮点容差 1e-9·scale)。
-
-### 3.5.C — 多银行动态同业(E2 同业动态化)
-
-**当前失真**:`InterbankNetwork` 只暴露静态 `build_core_periphery()`, 仿真初始化为 `None`。`apply_failure()` 已实现但需真实敞口才有意义。
-
-**目标**: 动态化的同业网络:
-1. **季度重连** (`rewire`): 每 3 tick 触发, 基于 CAR 排序重连核心-外围(健康银行取代失败银行进核心)
-2. **储备再平衡**: 每 tick 检测 `bank.reserves / total_assets` 偏离目标, 经同业市场拆出/拆入
-3. **真实拆借利率**: 用 policy_rate + 期限溢价(简化: 同业利率 = policy_rate + 0.5%)
-4. **失败传染**: 真实敞口驱动的损失分配(`apply_failure` 已存在)
-
-**改动范围**:
-- `financial_sim/network/interbank.py`: 新增 `rewire(banks, rng)`, `rebalance_reserves(banks, cb_rate)`
-- `financial_sim/core/step.py:_interbank_cycle`: 重写为真双边记账(已有 stub, 需补齐 reserve 通道 + 重新借息路径)
-- `financial_sim/core/simulation.py:_build_state`: 多银行时初始化 `interbank_network` 为 Core-Periphery
-
-**测试**:
-- `tests/unit/test_interbank.py`: 动态重连 + 储备再平衡
-- `tests/integration/test_interbank_failure_contagion`: 一家银行失败 → 同业传染 → 其他银行资本降
-
-**风险**: 中 — 单文件 ~80 行 + step.py 一处重写 ~80 行。
-
-### 3.5.D — NBFI 全开集成验证
-
-**当前失真**: 7 个 flag 默认关 → NBFI 路径未在集成测试中验证。已知 `enable_bond_market=True` 跑出 BS identity Δ=2000+ / bond mismatch Δ=3400+ 违反(2026-08-28 实测)。
-
-**目标**: 7 flag 默认全开, baseline 60 月 SFC 干净。
-
-| Flag | 已知问题 | 修复方向 |
-|---|---|---|
-| `enable_bond_market` | BS identity / bond mismatch | 检查 `_bond_cycle` 中 `bank.deposits_from_hh` 与 `cb.treasury_deposits` 是否双计 |
-| `enable_consumer_credit` | (未实测) | 默认 60 月跑测 |
-| `enable_stock_market` | (未实测) | 默认 60 月跑测 |
-| `enable_cross_holdings` | (未实测) | 默认 60 月跑测 |
-| `enable_investment_bank` | (未实测) | 需先开 stock_market |
-| `enable_asset_manager` | (未实测) | 需先开 stock_market |
-| `enable_supply_chain` | (未实测) | 默认 60 月跑测 |
-
-**改动范围**:
-- `financial_sim/config.py`: 7 个 flag `default=False` → `default=True`(独立 PR, 不与 3.5.A/B/C 合并)
-- 修复已知 SFC bug(若 bond_market 仍违反, 加修复 PR)
-- 新增 `tests/integration/test_all_features_on.py`: 所有 flag 开, baseline 60 月, SFC=0
-
-**风险**: 中 — 每 flag 5-20 行 fix; bond_market 可能需重构。
-
-### 3.5.E — 完整回归矩阵
-
-**目标**: 架构稳定后, 在统一 baseline + 7 场景 × 3 种子 = 21 跑, SFC 全绿; stylized_facts 7/10 项 pass。
-
-**测试**:
-- `tests/integration/test_phase3_acceptance.py`: 已存在, 加严 — 多银行场景也跑
-- `tests/calibration/test_stylized_facts.py`: 已存在, 期望全部 pass
-- `tests/integration/test_performance.py`: 仍 < 2s P95(n_households=1000, 12 firms × 6 sectors)
-
-### 3.5.F — 失真分析与调参
-
-**原则**: 架构稳定后, 一次只动一组参数:
-1. 结构性(部门份额 / 替代弹性 / 生产率)
-2. 行为性(MPC 分布 / 风险偏好 / 储蓄率)
-3. 政策规则(Taylor 系数 / 折旧率 / CAR 阈值)
-
-**目标**: 跑完每项 stylized fact, 列出当前值 vs 目标值(SCF / FRED), 逐项调整。
-
-**输出**: `IMPLEMENTATION.md §校准记录` — 每项调整的:
-- 原值 / 新值 / 调整后矩变化
-- 业务理由
-- 副作用监测
-
-### 3.5 实施顺序与依赖
-
-```
-3.5.A 多部门多家企业     (低风险, 先做)
-   ↓
-3.5.B 多银行真拆分       (高风险, 但需 A 提供更真实的部门流)
-   ↓
-3.5.C 同业动态化         (依赖 B 真实账户拆分)
-   ↓
-3.5.D NBFI 全开          (依赖 A+B+C 多主体环境)
-   ↓
-3.5.E 完整回归矩阵       (架构稳定后跑全套)
-   ↓
-3.5.F 失真分析与调参     (所有架构就位后调一次)
-```
-
-**建议 PR 顺序**(每项独立可合并, 失败可回滚):
-1. **PR-1** 3.5.A 多部门多家企业
-2. **PR-2** 3.5.B-init 多银行 init + 工具函数
-3. **PR-3** 3.5.B-cycle 多银行 step 改造 (分 PR-3a 工资/PR-3b 消费/PR-3c 政府/PR-3d 银行循环/PR-3e 违约/分红/PR-3f 同业)
-4. **PR-4** 3.5.C 同业动态化
-5. **PR-5** 3.5.D NBFI 全开 (含已知 SFC bug 修复)
-6. **PR-6** 3.5.E 完整回归矩阵
-7. **PR-7** 3.5.F 失真分析与调参
-
-每 PR 验收:
-- `pytest -q` 全绿 (允许新增的 xfail 但禁止回退)
-- `ruff check .` 干净
-- 文档同步: IMPLEMENTATION.md 状态更新 + AGENTS.md 关键约定
-
-### 已知风险
-
-1. **多银行浮点尾差**: `n_banks>=2` 时求和路径在 100+ 处都需按 share 拆分, 浮点累积误差可能超过 `1e-9·scale` 容差 → 需引入 `share * total` 路径优先, 残差给最后一家。
-2. **NBFI bond SFC bug**: 已观测到 `enable_bond_market=True` 后 `BS identity violation: banks A=18741 L=13663 NW=3061 Δ=2017` — 双计或多计。修复需先定位(`bank.deposits_from_hh` 路径中 `_bond_cycle` 是否参与)。
-3. **校准反复失效**: 任何架构改动都需重做 3.5.F。这是为什么把校准放在最后。
-4. **性能门禁**: 多企业 + 多银行 + NBFI 全开后, n_households=1000 / 12 firms × 6 sectors / 3 banks 的 P95 tick 可能逼近 2s 边界。瓶颈在 `_household_consumption` 的循环 (按 share 拆分到 3 banks 后每户多 3 次写入)。
-5. **Week-C rebalance xfail**: 与本阶段无直接依赖, 但 `enable_stock_market=True` 跑 baseline 后才会出现。留给 3.5.F 校准时观察。
-
----
-
-### Phase 5：校准与验证（持续运行，与 Phase 4 并行启动）
+### Phase 5 校准与验证（持续运行）
 
 | 工作流 | 内容 |
 |---|---|
-| 数据接入 | 美国: SCF 2019+FRED(GDP/失业/联邦基金/Case-Shiller)；中国: CHFS 2019。封装 `analytics/calibration_data.py`，离线缓存到 `reports/data/` |
-| 矩匹配 | 目标矩: 均值/波动/自相关/跨期相关(如失业-产出)。方法: 先网格搜索后 Nelder-Mead；参数集限 ≤20 个自由参数 |
-| 回归门禁 | CI 里跑 baseline + 2008 两场景，关键矩偏离基线 >25% 则 fail（防重构回归） |
-| 教学实验 | 每个教程课程配套"预期现象清单"（如加息→GDP 滞后 2-4 季度下降），实测对照写入 reports/ |
-| 版本化报告 | 每次 release 生成 `reports/calibration_<date>.md`: 参数表、矩对照表、失败项与调参建议 |
+| 数据接入 | SCF 2019 + FRED（美）；CHFS 2019（中，需申请）。封装 `analytics/calibration_data.py`，离线缓存 `reports/data/` |
+| 矩匹配 | 均值/波动/自相关/跨期相关；先网格搜索后 Nelder-Mead；自由参数 ≤20 |
+| 回归门禁 | CI 跑 baseline + crisis；关键矩偏离 golden >25% 则 fail |
+| 版本化报告 | 每次 release 生成 `reports/calibration_<date>.md` |
 
-风险与顺序: 校准易陷入"调一个坏三个"，规矩是**一次只动一组参数，先定结构性参数
-（份额/弹性），再定行为参数（MPC 分布/风险偏好），政策规则最后**。
-
----
-
-### 未决问题（需用户决策后启动对应模块）
-
-| # | 问题 | 建议 |
-|---|---|---|
-| Q7 | 债券市场是否引入期限分层（3 个月/3 年/10 年）还是单一永久债？ | 单一债起步，利率用期限结构公式定价（Nelson-Siegel 一因子） |
-| Q8 | 多部门firm数: 每 sector 12 家够不够统计意义？ | 12 家起步; 异质性靠 within-sector 分布而非家数 |
-| Q9 | Brock-Hommes 日级循环会显著拖慢性能，是否降频到周级？ | 先日级跑通测性能，>预算再降频 |
-| Q10 | 外资桩要不要进 MVP？ | 不进; 放 Phase 3 可选实验特性 |
-| Q11 | Phase 4 技术栈确认: Svelte + FastAPI 是否 OK？ | 是; 若团队更熟 React 改 React 也行, WebSocket 协议不变 |
-| Q12 | Phase 5 用美国数据还是中国数据为主？ | 双轨，先美国(FRED 免费/API 友好)，CHFS 需申请数据 |
-
----
-
-## 6. 关键依赖（实现顺序依据）
-
-| 上游 | 下游 | 说明 |
-|---|---|---|
-| SFC 校验 | 任何流量代码 | SFC 必须先于其他工作 |
-| RNGManager | 任何初始化 | 异质性种子不能凭空 |
-| 5 BS 类 | 主体类 | 主体必须先有 BS |
-| tick 编排 | 主体决策 | tick 决定调用顺序 |
-| 主体决策 | 市场出清 | 主体先决策，市场再出清 |
-| 主体决策 | 宏观聚合 | 聚合基于主体状态 |
-
----
-
----
-
-## 7. 附录：早期决策记录（原 §8 未决问题 Q1-Q6）
-
-实现期间均按建议默认值执行，记录如下避免重复讨论：
+## 6. 附录：早期决策记录（Q1-Q12）
 
 | # | 问题 | 采纳结果 |
 |---|---|---|
-| Q1 | 异质家庭分布初始参数 | 截断正态(储蓄率/MPC) + LogNormal(工资 σ=0.3, 存款中位数 20)，SCF 校准推迟到 Phase 5 |
-| Q2 | CES 部门参数 | stylized values（真实数据 Phase 5 接入） |
-| Q3 | 惯性 Taylor Rule | 采用, smoothing=0.85, 下限 −0.5% |
-| Q4 | MVP 家庭数量 | Phase 0/2 用 100-1000; Phase 3 目标 5000 |
-| Q5 | Brock-Hommes 规则数 | 全部 7 个，配置可开关（Phase 3 Week C 实现） |
-| Q6 | 外资模块 | MVP 不加，转 §5 未决问题 Q10 |
-
-新的待决问题 Q7-Q12 见 §5 末尾。
-
----
-
-## 8. 已识别风险（对照后续阶段）
-
-| 风险 | 阶段 | 缓解 |
-|---|---|---|
-| 多主体化后 tick 性能超标 | Phase 3 | Polars 向量化 + Week F 统一压测; 不达标降 BH 循环频率(Q9) |
-| 校准调参"动一发坏全身" | Phase 5 | 一次一组参数; CI 矩回归门禁 |
-| UI 层耦合模型内核 | Phase 4 | 干预只走 ShockEvent DSL; 状态只从快照投影 |
+| Q1 | 家庭异质性分布 | 截断正态(储蓄率/MPC) + LogNormal(工资/存款)；SCF 校准推迟 Phase 5 |
+| Q2 | CES 部门参数 | stylized values；真实数据接入留 Phase 5 |
+| Q3 | Taylor Rule | 惯性版，smoothing=0.85，下限 −0.5% |
+| Q4 | 家庭数量 | 100-1000 起步；性能门禁 5000 |
+| Q5 | BH 规则数 | 全部 7 条，配置可开关 |
+| Q6/Q10 | 外资模块 | 不做 |
+| Q7 | 债券期限结构 | 单一永久债起步（现状），期限分层见残留 #1 专项 |
+| Q8 | 每 sector 企业数 | 默认 1 向后兼容（PR-1 决策）；多企业显式配置 |
+| Q9 | BH 循环频率 | 日级子步 12/月，实测 ~7ms/tick 达标 |
+| Q11 | Phase 4 技术栈 | FastAPI + Svelte 5，已交付 |
+| Q12 | 校准数据 | 美国数据为主（FRED 免费），CHFS 双轨后置 |
