@@ -417,6 +417,7 @@ class Simulation:
         # ⚠️ SFC 简化约定 (文档化): 建模上视股票由家庭"在初始时刻以既存财富
         # 交换取得", 初始不产生银行科目变动 — 与住房"既存资产"同一处理.
         stock_market: StockMarket | None = None
+        cross_edges: dict = {}  # 仅在股票市场块内赋值; 股票关+交叉持股开的组合下保持空
         if bool(getattr(config, "enable_stock_market", False)):
             shares_per_firm = int(getattr(config, "firm_shares_outstanding", 500))
             total_supply = shares_per_firm * len(firms)

@@ -15,6 +15,10 @@ ALL_SECTORS = [
 
 
 def _stock_sim(n_ticks: int = 36, seed: int = 42, **kw) -> Simulation:
+    # Phase 3.5 PR-5: Week D 模块默认开; 本文件测的是 Week C 股票市场本身的
+    # 记账性质 (如家庭间过户守恒), 显式关掉 NBFI 以隔离变量.
+    kw.setdefault("enable_asset_manager", False)
+    kw.setdefault("enable_investment_bank", False)
     cfg = SimConfig(
         n_households=300, n_ticks=n_ticks, seed=seed,
         sectors=list(ALL_SECTORS), enable_stock_market=True, **kw,
@@ -29,10 +33,15 @@ class TestStockMarketAcceptance:
         assert sum(len(v) for v in state.sfc_violations) == 0
 
     def test_holdings_conserve_supply(self):
-        """家庭持仓总和 == 总股数 (买卖只是过户)."""
+        """家庭持仓 + 企业互持 == 总股数 (买卖只是过户).
+
+        Phase 3.5 PR-5: enable_cross_holdings 默认开, 发行人把 beta 比例
+        划给企业股东, 守恒口径要含企业互持.
+        """
         state = _stock_sim(seed=42).run(36)
         mkt = state.stock_market
         held = sum(h.stock_units for h in state.households)
+        held += sum(sum(t.values()) for t in state.cross_holdings.values())
         assert abs(held - mkt.supply_units) < 1e-6 * max(1.0, mkt.supply_units)
 
     def test_deposit_mirror_aggregate(self):
@@ -104,10 +113,11 @@ class TestPortfolioChoiceM2:
         assert all(0.0 <= t <= 1.0 for t in tols)
 
     def test_supply_conserved_under_rebalance(self):
-        """再平衡是家庭间过户: 总持仓仍等于发行股数."""
+        """再平衡是家庭间过户: 总持仓 (含企业互持, PR-5 默认开) 仍等于发行股数."""
         state = self._run(seed=42)
         mkt = state.stock_market
         held = sum(h.stock_units for h in state.households)
+        held += sum(sum(t.values()) for t in state.cross_holdings.values())
         assert abs(held - mkt.supply_units) < 1e-6 * max(1.0, mkt.supply_units)
 
     def test_deposit_mirror_after_rebalance(self):

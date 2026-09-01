@@ -94,13 +94,13 @@ class SimConfig(BaseModel):
     bank_dividend_car_target: float = 0.14  # 分红后要保留的 CAR (超额部分才分)
 
     # ── Bond market (P0-b) ──
-    enable_bond_market: bool = False       # ⚠️ 默认关闭 — 见 docs/IMPLEMENTATION.md §5.0 P0-b
+    enable_bond_market: bool = True        # Phase 3.5 PR-5: 默认开 (P0-b 已验证 SFC)
     bond_coupon_rate: float = 0.025        # 票息率 (= 默认 policy_rate; 上层可改)
     bond_issuance_household_share: float = 0.7  # 新发债中给家庭的比例 (银行 1-此)
     bond_max_debt_to_gdp: float = 1.5      # 债务/GDP 上限 (debt brake)
 
     # ── Consumer credit (P0-a) ──
-    enable_consumer_credit: bool = False  # ⚠️ 默认关闭 — 同 P0-b 原因
+    enable_consumer_credit: bool = True   # Phase 3.5 PR-5: 默认开 (P0-a 已验证 SFC)
     consumer_loan_spread: float = 0.05    # 消费贷利率相对 policy_rate 的溢价
     consumer_loan_dti_limit: float = 0.40 # DTI 上限
     consumer_loan_term_months: int = 60   # 期限 (5 年)
@@ -169,7 +169,7 @@ class SimConfig(BaseModel):
     labor_wage_phillips_coeff: float = 0.04  # κ: 失业缺口→工资(年率). 校准2026-08: 0.10 时低失业环境让实际工资持续爬升越过生产率 (200月+50%), 企业毛利转负 → 债务慢性累积至清算.
 
     # ── Stock market (Phase 3 Week C): Brock-Hommes 异质信念 ──
-    enable_stock_market: bool = False     # 默认关闭 (骨架已验证 SFC 干净)
+    enable_stock_market: bool = True      # Phase 3.5 PR-5: 默认开 (Week C 已验证 SFC)
     n_stock_traders: int = 12             # BH 交易者数量 (聚合家庭部门的代理)
     firm_shares_outstanding: int = 500    # 每家企业发行股数 (IPO)
     stock_par_price: float = 10.0         # IPO 票面价锚 (账面权益≤0 时使用)
@@ -189,13 +189,13 @@ class SimConfig(BaseModel):
     portfolio_rebalance_speed: float = 0.20   # 每月向目标权重迁移比例
 
     # ── Week C M3: 交叉持股骨架 ──
-    enable_cross_holdings: bool = False      # 默认关闭 (骨架; 经济效应 Week D 接入)
+    enable_cross_holdings: bool = True       # Phase 3.5 PR-5: 默认开 (Week C-M3 验证)
     cross_hold_beta: float = 0.2             # 发行人划给企业股东的股数比例
     cross_hold_m_links: int = 2              # 每发行人持有的持有人连接数 (BA)
 
     # ── Week D: 投行 + 资管 (需 enable_stock_market=True) ──
-    enable_investment_bank: bool = False    # 默认关闭
-    enable_asset_manager: bool = False      # 默认关闭
+    enable_investment_bank: bool = True     # Phase 3.5 PR-5: 默认开 (Week D 验证)
+    enable_asset_manager: bool = True       # Phase 3.5 PR-5: 默认开 (Week D 验证)
     ib_initial_capital_per_hh: float = 1.0  # 每户认购的投行资本 (元)
     ib_leverage_max: float = 5.0            # 名义杠杆上限
     ib_margin_requirement: float = 0.08     # capital/assets 强平线
@@ -207,7 +207,7 @@ class SimConfig(BaseModel):
     am_subscription_momentum: float = 0.01  # 正动量时的申购率
 
     # ── Week E-M1: 供应链 IO (中间品 = 能源投入) ──
-    enable_supply_chain: bool = False        # 默认关闭
+    enable_supply_chain: bool = True         # Phase 3.5 PR-5: 默认开 (Week E-M1 验证)
     io_input_share_default: float = 0.08     # 各部门产量价值中能源投入占比
     io_input_shares: dict[str, float] = Field(default_factory=lambda: {
         "consumer_goods": 0.10,

@@ -614,9 +614,9 @@ pydantic 校验→ShockEvent 注入 EventManager); GET interventions 只读审�
 | Minsky 失业螺旋 | ✅ | `labor_adjust_down_speed` 0.06→0.20,`labor_matching_efficiency` 0.50→0.30; `TestCrisisEmergence::test_minsky_peak_unemployment` 已通过 |
 | **PR-1** 多部门多家企业 | ✅ | `n_firms_per_sector` 从死代码生效; 默认 = 1 向后兼容; 9 新测试; `tests/integration/test_multifirm.py` |
 | **PR-2** 多银行 init | ✅ | `home_bank_id` (HH + firm) + `market_share` (deposit-weighted) + `_allocate_share` 工具; 14 新测试; `tests/integration/test_multibank_init.py` |
-| **PR-3** 多银行 step.py 拆分 | ⏳ | `_pay_wages` / `_household_consumption` / `_government_cycle` / `_bank_cycle` / `_housing_cycle` / `_default_resolution` / `_dividend_cycle` 按 `market_share` 拆分; 主银行语义保留为 `n_banks=1` 优化路径 |
-| **PR-4** 同业动态化 | ⏳ | `InterbankNetwork.rewire()` + 储备再平衡 + `_interbank_cycle` 真双边记账 |
-| **PR-5** NBFI 全开验证 | ⏳ | 7 个 flag 默认开, 逐个 SFC 验证, 已知 `bond_market` 有 BS identity 违反待修 |
+| **PR-3** 多银行 step.py 拆分 | ✅ | PR-3a `pay_wages` / 3b `consumption` / 3c `gov_cycle` / 3d `bank_cycle` / 3e `housing` / 3f `default + dividend + mortgage_default` — 全部按 firm/HH 的 `home_bank_id` 镜像; PR-2 init 同步拆 deposit + reserve + loan + mortgage; 单银行维持主银行语义快路径 |
+| **PR-4** 同业动态化 | ✅ | `InterbankNetwork.rewire()` 季度重连 (按 CAR 重排核心); 多银行 init 自动启用网络; `_interbank_cycle` 集成 rewire; `rebalance_reserves` 暂禁用 (跨银行 per-bank BS 不平衡已知,留 PR-4+); 11 新测试 |
+| **PR-5** NBFI 全开验证 | ✅ | 7 个 flag 默认开 + SFC 修复: ① `_bond_cycle` CB 持债只按银行份额 `bank_amt` 入账 (全额入账与 hh 持债双计); ② hh 买债/收息补银行准备金镜像; ③ CB 持债利息按"利润上缴"净零处理 (原错付给商业银行准备金); ④ IB 强平抛售改走 `_cross_trade_with_households` 真实成交 (原凭空记现金+单位消失,银行 BS 违反); ⑤ `simulation.py` 股票关+交叉持股开的 `cross_edges` UnboundLocal; Phase 行为/校准验收测试显式钉住各 Phase 模块组合, 全开动态的矩再校准留 PR-7 |
 | **PR-6** 完整回归矩阵 | ⏳ | 7 场景 × 3 种子 + stylized_facts 全跑 |
 | **PR-7** 失真分析与调参 | ⏳ | 架构稳定后一次性校准, 一次只动一组参数 |
 

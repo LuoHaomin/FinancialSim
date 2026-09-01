@@ -37,7 +37,18 @@ def baseline_run():
     from financial_sim.config import SimConfig
     from financial_sim.core import Simulation
 
-    config = SimConfig(n_households=200, n_ticks=120, seed=42)
+    config = SimConfig(
+        n_households=200, n_ticks=120, seed=42,
+        # Phase 3.5 PR-5: 模块默认开. 本套件的矩阈值按 PR-5 之前的核心
+        # 经济校准 (见各断言内的校准注释); 全开动态的矩再校准留给 PR-7.
+        enable_bond_market=False,
+        enable_consumer_credit=False,
+        enable_stock_market=False,
+        enable_cross_holdings=False,
+        enable_investment_bank=False,
+        enable_asset_manager=False,
+        enable_supply_chain=False,
+    )
     sim = Simulation(config)
     sim.run(n_ticks=120)
     return sim

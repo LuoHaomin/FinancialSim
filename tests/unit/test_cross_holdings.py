@@ -80,7 +80,11 @@ class TestCrossHoldingsIntegration:
         assert sum(len(v) for v in state.sfc_violations) == 0
 
     def test_total_supply_conservation_three_way(self):
-        """家庭持仓 + 企业互持 == 总股数; 互持双边相等."""
+        """家庭持仓 + 企业互持 + NBFI (资管/投行) 持仓 == 总股数; 互持双边相等.
+
+        Phase 3.5 PR-5: enable_asset_manager 默认开后股份会流向资管,
+        守恒检查必须把它算进来 (单位数守恒不变, 只是持有者集合变多).
+        """
         state = self._sim(seed=42).run(36)
         mkt = state.stock_market
         held_hh = sum(h.stock_units for h in state.households)
@@ -88,7 +92,12 @@ class TestCrossHoldingsIntegration:
             sum(t.values()) for t in state.cross_holdings.values()
         )
         issued_to_firms = sum(f.shares_held_by_firms for f in state.firms)
-        assert abs((held_hh + held_firms) - mkt.supply_units) < 1e-4
+        held_nbfi = 0.0
+        if state.asset_manager is not None:
+            held_nbfi += state.asset_manager.stock_units
+        if state.investment_bank is not None:
+            held_nbfi += state.investment_bank.stock_units
+        assert abs((held_hh + held_firms + held_nbfi) - mkt.supply_units) < 1e-4
         assert abs(held_firms - issued_to_firms) < 1e-6
 
     def test_dual_account_net_out_in_aggregate_bs(self):
@@ -132,10 +141,11 @@ class TestCrossHoldingsIntegration:
             )
             assert abs(restored_shares - graph_shares) < 1e-9
 
-    def test_disabled_by_default_no_effect(self):
+    def test_disabled_when_explicitly_off(self):
         cfg = SimConfig(
             n_households=100, n_ticks=6, sectors=list(ALL_SECTORS),
             enable_stock_market=True,
+            enable_cross_holdings=False,  # Phase 3.5 PR-5: 默认开, 显式关
         )
         state = Simulation(cfg, seed=1).run(6)
         assert state.cross_holdings == {}

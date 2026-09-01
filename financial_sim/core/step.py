@@ -505,7 +505,7 @@ def _household_consumption(state: SimulationState) -> None:
                 distributed += pay
             # 退款按 HH 的 home_bank 加回 (多银行); 单银行加 banks[0]
             if multi_bank:
-                for hid, hh_obj in enumerate(state.households):
+                for _hid, _hh_obj in enumerate(state.households):
                     # 残差处理: 按户均摊后, 每户的退款应回到自己 home_bank.
                     # 简化: 把全部 refund 按 hh_paid_by_bank 份额加回 (近似)
                     # (理想是 per-HH refund per home_bank — 见 docs)
@@ -517,7 +517,8 @@ def _household_consumption(state: SimulationState) -> None:
                     for bid in hh_paid_by_bank:
                         bank_by_id[bid].deposits_from_hh += per_bank_refund  # type: ignore[attr-defined]
                     # 残差给 banks[0]
-                    bank_by_id[sim := list(bank_by_id.values())[0].id].deposits_from_hh += refund - per_bank_refund * n_banks_active  # type: ignore[attr-defined]
+                    first_bank = list(bank_by_id.values())[0]
+                    bank_by_id[first_bank.id].deposits_from_hh += refund - per_bank_refund * n_banks_active  # type: ignore[attr-defined]
             else:
                 bank.deposits_from_hh += refund
 
@@ -1013,15 +1014,24 @@ def _bond_cycle(state: SimulationState) -> None:
             pay = amt * bond_mkt.coupon_rate / 12.0
             if pay <= 0:
                 continue
+            if hid == cb.id:
+                # CB 持债利息: 财政部付给 CB, CB 以"利润上缴"立即回存 treasury
+                # → 两个账户净零. 不能走下面的银行分支, 否则商业银行准备金
+                # 凭空增加 (phantom asset, bank BS identity 违反).
+                interest_paid += pay
+                continue
             # 从 gov.treasury_deposits 流出; 接收方按 hid 类型分流
             gov.treasury_deposits = max(0.0, gov.treasury_deposits - pay)
             cb.treasury_deposits = max(0.0, cb.treasury_deposits - pay)
             if hid.startswith("hh_") or hid.startswith("h_"):
-                # 家庭收款: deposits ↑
+                # 家庭收款: deposits ↑; 镜像: 银行准备金资产 ↑pay
+                # (资金链: gov treasury @CB ↓pay → 银行准备金 ↑pay → HH 存款 ↑pay)
                 h = _find_household(state, hid)
                 if h is not None:
                     h.deposits += pay
                     bank.deposits_from_hh += pay
+                    bank.reserves += pay
+                    cb.bank_reserves += pay
             else:
                 # 银行收款: 钱从政府 treasury 账户 → 银行准备金.
                 #   cb.bank_reserves ↑pay   (CB 账上银行的存款↑)
@@ -1078,13 +1088,17 @@ def _bond_cycle(state: SimulationState) -> None:
         bank.deposits_from_hh = max(
             0.0, bank.deposits_from_hh - hh_total
         )
+        # 存款搬家必须镜像到资产端: 家庭付款买债 → 银行准备金 ↓hh_total
+        # (CB 账上同步 ↓, 否则银行 BS 虚增资产 / CB BS 虚减).
+        bank.reserves = max(0.0, bank.reserves - hh_total)
+        cb.bank_reserves = max(0.0, cb.bank_reserves - hh_total)
     bank_amt = issuance_need - hh_total
     if bank_amt > 0:
         # 银行的"份额"直接归 CB (银行用准备金买债容易出现"准备金不足买债"
         # 引起的 phantom 资产, 这里简化为: 私人买不到的部分由 CB 持有).
         # 在更精细的实现里, 应引入银行自营账户, 与客户存款严格区分.
         allocations[cb.id] = allocations.get(cb.id, 0.0) + bank_amt
-        cb.gov_bonds += bank_amt
+        cb.gov_bonds += bank_amt  # CB 只承接银行份额; 全额入账会在下方与 hh 持债重复计
 
     # 私人部门买债时, 钱从私人部门的存款"搬家"到政府 treasury 账户.
     # 镜像记账:
@@ -1093,7 +1107,8 @@ def _bond_cycle(state: SimulationState) -> None:
 
     # 政府 / CB 入账 (债务存量增加)
     gov.debt += issuance_need
-    cb.gov_bonds += issuance_need  # CB 仍是承接方 (隐含"包销+二级转私人")
+    # CB 持债已在上面按 bank_amt 入账 (隐含"包销+二级转私人"), 此处不再重复,
+    # 否则 Bond mismatch: holdings = hh + cb 两边都计了 hh 份额.
 
     # 更新市场簿记
     bond_mkt.issue(issuance_need, allocations)
@@ -1638,10 +1653,20 @@ def _investment_bank_cycle(state: SimulationState) -> None:
             if need <= 1e-9 or ib.stock_units <= 1e-12:
                 break
             units_needed = min(ib.stock_units, need / price * 1.5 + 1e-9)
-            cash = units_needed * price
-            ib.stock_units -= units_needed
-            ib.deposits += cash
-            bank.deposits_from_nbfi += cash
+            sale_value = units_needed * price
+            # 强平抛售必须与家庭真实成交 (PR-5 修复): 原实现凭空给 IB 记现金
+            # (bank.deposits_from_nbfi 无买家付款镜像) 且股票单位凭空消失,
+            # 造成银行 BS identity 违反 + 单位不守恒.
+            filled = _cross_trade_with_households(
+                state, -sale_value, price
+            )
+            if filled <= 1e-9:
+                break                             # 家庭吸收不足 → 本期强平到此为止
+            units_sold = filled / price
+            ib.stock_units -= units_sold
+            ib.deposits += filled
+            bank.deposits_from_nbfi += filled
+            bank.deposits_from_hh -= filled
             # fire-sale 价格冲击 (Brunnermeier-Pedersen: 抛售压价)
             press = impact * min(1.0, units_needed /
                                  max(mkt.depth_scale(), 1e-9))
@@ -2418,30 +2443,32 @@ def _interbank_cycle(state: SimulationState) -> None:
 
     # ── PR-4: 季度 rewire (每 N tick) ──
     rewire_freq = int(_cfg(state, "interbank_rewire_freq", 3))
-    if rewire_freq > 0 and state.t > 0 and state.t % rewire_freq == 0:
-        if state.interbank_network.last_rewire_t != state.t:
-            rw_rng = getattr(state, "rng_manager", None)
-            rw_py_rng = None
-            if rw_rng is not None:
-                rw_py_rng = rw_rng.stream("interbank_rewire")
-            else:
-                import random as _r
-                rw_py_rng = _r.Random(state.t)
-            avg_ib = float(_cfg(state, "interbank_avg_exposure", 50.0))
-            core_sz = int(_cfg(state, "interbank_core_size", 3))
-            link_dens = float(_cfg(state, "interbank_link_density", 0.5))
-            state.interbank_network.rewire(
-                banks=state.banks,
-                core_size=core_sz,
-                link_density=link_dens,
-                avg_exposure=avg_ib,
-                rng=rw_py_rng,
-                current_t=state.t,
-            )
-            logger.info(
-                f"  interbank rewire at t={state.t}: "
-                f"{len(state.interbank_network.exposures)} edges"
-            )
+    if (
+        rewire_freq > 0 and state.t > 0 and state.t % rewire_freq == 0
+        and state.interbank_network.last_rewire_t != state.t
+    ):
+        rw_rng = getattr(state, "rng_manager", None)
+        rw_py_rng = None
+        if rw_rng is not None:
+            rw_py_rng = rw_rng.stream("interbank_rewire")
+        else:
+            import random as _r
+            rw_py_rng = _r.Random(state.t)
+        avg_ib = float(_cfg(state, "interbank_avg_exposure", 50.0))
+        core_sz = int(_cfg(state, "interbank_core_size", 3))
+        link_dens = float(_cfg(state, "interbank_link_density", 0.5))
+        state.interbank_network.rewire(
+            banks=state.banks,
+            core_size=core_sz,
+            link_density=link_dens,
+            avg_exposure=avg_ib,
+            rng=rw_py_rng,
+            current_t=state.t,
+        )
+        logger.info(
+            f"  interbank rewire at t={state.t}: "
+            f"{len(state.interbank_network.exposures)} edges"
+        )
 
 
 def _fire_sale_and_failure(state: SimulationState) -> None:

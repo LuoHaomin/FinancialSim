@@ -60,7 +60,6 @@ class TestInterbankNetworkRewire:
         net = InterbankNetwork.build_core_periphery(
             ["b1", "b2", "b3"], 3, 0.5, 100.0, rng=rng
         )
-        initial_edges = set(net.exposures.keys())
         # 触发 rewire
         net.rewire(
             banks=banks, core_size=2, link_density=0.5,
@@ -120,7 +119,6 @@ class TestInterbankNetworkRewire:
         net = InterbankNetwork.build_core_periphery(
             ["b1", "b2", "b3"], 3, 0.5, 100.0, rng=rng
         )
-        initial_t = net.last_rewire_t
         net.rewire(banks, 3, 0.5, 100.0, rng, current_t=5)
         first_edges = set(net.exposures.keys())
         # 同 tick 再次调用应 no-op
