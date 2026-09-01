@@ -617,8 +617,8 @@ pydantic 校验→ShockEvent 注入 EventManager); GET interventions 只读审�
 | **PR-3** 多银行 step.py 拆分 | ✅ | PR-3a `pay_wages` / 3b `consumption` / 3c `gov_cycle` / 3d `bank_cycle` / 3e `housing` / 3f `default + dividend + mortgage_default` — 全部按 firm/HH 的 `home_bank_id` 镜像; PR-2 init 同步拆 deposit + reserve + loan + mortgage; 单银行维持主银行语义快路径 |
 | **PR-4** 同业动态化 | ✅ | `InterbankNetwork.rewire()` 季度重连 (按 CAR 重排核心); 多银行 init 自动启用网络; `_interbank_cycle` 集成 rewire; `rebalance_reserves` 暂禁用 (跨银行 per-bank BS 不平衡已知,留 PR-4+); 11 新测试 |
 | **PR-5** NBFI 全开验证 | ✅ | 7 个 flag 默认开 + SFC 修复: ① `_bond_cycle` CB 持债只按银行份额 `bank_amt` 入账 (全额入账与 hh 持债双计); ② hh 买债/收息补银行准备金镜像; ③ CB 持债利息按"利润上缴"净零处理 (原错付给商业银行准备金); ④ IB 强平抛售改走 `_cross_trade_with_households` 真实成交 (原凭空记现金+单位消失,银行 BS 违反); ⑤ `simulation.py` 股票关+交叉持股开的 `cross_edges` UnboundLocal; Phase 行为/校准验收测试显式钉住各 Phase 模块组合, 全开动态的矩再校准留 PR-7 |
-| **PR-6** 完整回归矩阵 | ⏳ | 7 场景 × 3 种子 + stylized_facts 全跑 |
-| **PR-7** 失真分析与调参 | ⏳ | 架构稳定后一次性校准, 一次只动一组参数 |
+| **PR-6** 完整回归矩阵 | ✅ | `tests/integration/test_regression_matrix.py` 7 场景 × 3 种子 = 63 用例: 零 SFC + 关键矩有限性 + golden 逐位锁定 (PR-5 全开体制基线) |
+| **PR-7** 失真分析与调参 | ✅(第一期) | 供应链冷启动死亡螺旋修复: ① `io_warmup_months=12` 预热期 (供应商初始零库存, 首拍产出即被砍 → 实测 300 户首拍 u 40%); ② 产出折减按 IO 成本份额加权 `eff_util = 1 − share×(1−util)` (原硬折减使 10% 投入缺口瞬间清零产出, t=12 预热结束即 u 89%); Firm 新增 `io_input_share` 字段. 效果: 300 户全开 u_end 0.42→0, gdp 112→325; labor/multifirm/multisector/stock 验收测试全部解除钉住 (全开通过). 残留 (后续期): log-wealth 偏度全开下 -1.1~-1.5 (债券强制融资流动性再分配, 校准套件仍钉核心体制); stagflation 单企业经济全灭 (HEAD 既有, 场景待配多部门); 冲击对 real_gdp 钝化 (HEAD 既有, 非 PR-5 回归) |
 
 测试基线 (PR-2 完成): 365 passed · 1 xfail (`test_rebalance_tolerant_households_hold_more`) · ruff clean · 0 SFC violation.
 

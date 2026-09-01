@@ -218,6 +218,10 @@ class SimConfig(BaseModel):
         "services": 0.04,
     })
     io_capacity_warning_ratio: float = 0.95  # 利用率低于此值告警 (教学诊断)
+    # PR-7 冷启动修复: 供应商初始零库存 → 若首月即按 input_utilization 折减
+    # 产出, 全经济瞬间产出坍缩 → 裁员 → 需求塌缩 (300 户实测 u 首拍 40%).
+    # 预热期内照常采购但不折减产出, 给供应商留出建库存的时间.
+    io_warmup_months: int = 12
 
     # ── Firm dividends (Week B): 企业超额现金按比例分给家庭股东 ──
     enable_firm_dividends: bool = True

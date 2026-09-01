@@ -39,15 +39,6 @@ def _austerity_sim(n_ticks: int = 96, seed: int = 42) -> Simulation:
     config = SimConfig(
         n_households=300, n_ticks=n_ticks, seed=seed,
         sectors=list(ALL_SECTORS),
-        # Phase 3.5 PR-5: 模块默认开; 本测试验收 Week B 劳动市场语义,
-        # 显式关掉其余模块以隔离变量 (全开动态待 PR-7 校准).
-        enable_bond_market=False,
-        enable_consumer_credit=False,
-        enable_stock_market=False,
-        enable_cross_holdings=False,
-        enable_investment_bank=False,
-        enable_asset_manager=False,
-        enable_supply_chain=False,
     )
     return Simulation(config, scenario_events=em)
 

@@ -1065,18 +1065,30 @@ def _bond_cycle(state: SimulationState) -> None:
     if issuance_need <= 0:
         return
 
-    # 分配: 家庭 (按 deposits 比例) + 银行 (剩余 + 舍入残差)
+    # 分配: 家庭 (按缓冲外存款加权) + 银行 (剩余 + 舍入残差)
     hh_share_target = float(
         _cfg(state, "bond_issuance_household_share", 0.7)
     )
-    hh_total_dep = sum(h.deposits for h in state.households)
+    # PR-7: 认购不动家庭流动性缓冲 (1 个月永久收入). 原按总存款等比抽款
+    # 等于对穷户征流动性税 → 需求收缩集中在底部 → log-wealth 左尾加深
+    # (200 户实测 skew -0.83 → -1.45).
+    buffers_total = 0.0
+    weights: dict[str, float] = {}
+    for h in state.households:
+        buf = float(getattr(h, "permanent_income", 0.0))
+        wgt = max(0.0, float(h.deposits) - buf)
+        weights[h.id] = wgt
+        buffers_total += wgt
     allocations: dict[str, float] = {}
     hh_total = 0.0  # 实际计入家庭的总分配 (含 <1e-6 跳过的部分, 留给银行)
-    if hh_total_dep > 0:
+    if buffers_total > 0:
         target_hh = issuance_need * hh_share_target
         for h in state.households:
-            w = h.deposits / hh_total_dep
-            amt = w * target_hh
+            wgt = weights.get(h.id, 0.0)
+            if wgt <= 0:
+                continue
+            amt = wgt / buffers_total * target_hh
+            amt = min(amt, float(h.deposits))
             if amt < 1e-6:
                 # 不分配给这家 (避免微小噪声), 额计入银行承担的部分
                 continue
@@ -1883,11 +1895,17 @@ def _supply_chain_cycle(state: SimulationState) -> None:
     ]
     for f in state.firms:
         f.input_utilization = 1.0          # 每期重置
+        f.io_input_share = float(
+            shares.get(f.sector, default_share)
+        ) if cfg else 0.0
     if not suppliers:
         return
 
     warn_ratio = float(getattr(cfg, "io_capacity_warning_ratio", 0.95)) \
         if cfg else 0.95
+    # PR-7 冷启动: 预热期内不折减产出 (供应商初始零库存, 见 config 注释)
+    warmup = int(getattr(cfg, "io_warmup_months", 12)) if cfg else 12
+    in_warmup = state.t < warmup
     for buyer in state.firms:
         if buyer.is_bankrupt or buyer is None or buyer in suppliers:
             continue
@@ -1914,8 +1932,10 @@ def _supply_chain_cycle(state: SimulationState) -> None:
             received += v
             remaining -= v
         util = min(1.0, received / desired) if desired > 1e-9 else 1.0
+        if in_warmup:
+            util = 1.0
         buyer.input_utilization = util
-        if util < warn_ratio:
+        if util < warn_ratio and not in_warmup:
             logger.info(
                 f"  supply-chain: {buyer.id} 输入满足率 {util:.2f} "
                 f"(断供传导 → 本月产出折减)"

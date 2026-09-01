@@ -45,6 +45,10 @@ class Firm:
 
     # ── Phase 3 Week E: 供应链 ──
     input_utilization: float = 1.0         # 当月中游投入满足率 ∈ [0,1]
+    # IO 投入成本份额 (PR-7: 由 _supply_chain_cycle 按部门份额逐期写入).
+    # 产出折减按份额加权: 缺 100% 投入 → 产出降 io_share (而非归零).
+    # 原硬折减 (eff_a = A × util) 使 10% 的投入缺口瞬间清零全经济产出.
+    io_input_share: float = 0.0
     demand_history: list[float] | None = None  # 需求意向历史 (Week B 劳动需求基准)
 
     # ── 财务 ──
@@ -78,10 +82,17 @@ class Firm:
         - linear: Y = A × L (Phase 0 形式)
         - ces:    Y = A × (α·K^ρ + (1−α)·L^ρ)^(1/ρ), ρ = 1 − 1/σ
           σ→∞ 时退化为线性; σ=1 时为 Cobb-Douglas A·K^α·L^(1−α) (数值守护).
+
+        投入满足率的影响按成本份额加权 (PR-7):
+          eff_util = 1 − io_share × (1 − util)
+        io_share=0 (无 IO 约束) 时退化为原线性; io_share=α 与中间品
+        成本份额一致 — 缺全部投入的产出损失 = 份额, 不是 100%.
         """
         util = getattr(self, "input_utilization", 1.0)
+        io_share = min(1.0, max(0.0, getattr(self, "io_input_share", 0.0)))
+        eff_util = 1.0 - io_share * (1.0 - util)
         if self.production_function != "ces":
-            return self.productivity * util * self.employees
+            return self.productivity * eff_util * self.employees
 
         rho = 1.0 - 1.0 / self.sigma_elasticity
         labor = float(max(0, self.employees))
@@ -92,12 +103,12 @@ class Firm:
             cap_term = self.capital ** self.alpha_capital
             lab_term = labor ** (1.0 - self.alpha_capital) if labor > 0 else 0.0
             return (
-                self.productivity * getattr(self, 'input_utilization', 1.0)
+                self.productivity * eff_util
                 * cap_term * lab_term
             )
         k_term = self.alpha_capital * self.capital ** rho
         l_term = (1.0 - self.alpha_capital) * labor ** rho
-        eff_a = self.productivity * getattr(self, "input_utilization", 1.0)
+        eff_a = self.productivity * eff_util
         return eff_a * (k_term + l_term) ** (1.0 / rho)
 
     def revenue(self) -> float:

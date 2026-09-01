@@ -100,15 +100,6 @@ class TestMultiFirmPerSector:
             n_firms_per_sector=3,
             sectors=["consumer_goods", "capital", "energy"],
             seed=42,
-            # Phase 3.5 PR-5: 7 个模块默认开; 本测试验收 PR-1 的多企业语义,
-            # 显式关掉 NBFI/债市/供应链以隔离变量 (全开动态待 PR-7 校准).
-            enable_bond_market=False,
-            enable_consumer_credit=False,
-            enable_stock_market=False,
-            enable_cross_holdings=False,
-            enable_investment_bank=False,
-            enable_asset_manager=False,
-            enable_supply_chain=False,
         )
         sim = Simulation(cfg)
         sim.run(24)

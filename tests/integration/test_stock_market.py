@@ -15,10 +15,6 @@ ALL_SECTORS = [
 
 
 def _stock_sim(n_ticks: int = 36, seed: int = 42, **kw) -> Simulation:
-    # Phase 3.5 PR-5: Week D 模块默认开; 本文件测的是 Week C 股票市场本身的
-    # 记账性质 (如家庭间过户守恒), 显式关掉 NBFI 以隔离变量.
-    kw.setdefault("enable_asset_manager", False)
-    kw.setdefault("enable_investment_bank", False)
     cfg = SimConfig(
         n_households=300, n_ticks=n_ticks, seed=seed,
         sectors=list(ALL_SECTORS), enable_stock_market=True, **kw,
@@ -42,6 +38,10 @@ class TestStockMarketAcceptance:
         mkt = state.stock_market
         held = sum(h.stock_units for h in state.households)
         held += sum(sum(t.values()) for t in state.cross_holdings.values())
+        if state.asset_manager is not None:
+            held += state.asset_manager.stock_units
+        if state.investment_bank is not None:
+            held += state.investment_bank.stock_units
         assert abs(held - mkt.supply_units) < 1e-6 * max(1.0, mkt.supply_units)
 
     def test_deposit_mirror_aggregate(self):
@@ -118,6 +118,10 @@ class TestPortfolioChoiceM2:
         mkt = state.stock_market
         held = sum(h.stock_units for h in state.households)
         held += sum(sum(t.values()) for t in state.cross_holdings.values())
+        if state.asset_manager is not None:
+            held += state.asset_manager.stock_units
+        if state.investment_bank is not None:
+            held += state.investment_bank.stock_units
         assert abs(held - mkt.supply_units) < 1e-6 * max(1.0, mkt.supply_units)
 
     def test_deposit_mirror_after_rebalance(self):

@@ -28,23 +28,36 @@ class TestInputUtilization:
         assert f.input_utilization == 1.0
 
     def test_production_scales_with_utilization(self):
+        """PR-7 重校准: 产出折减按 IO 成本份额加权.
+
+        缺 100% 投入的产出损失 = io_share (成本份额), 不再是 100% 归零 —
+        原硬折减使 10% 投入缺口瞬间清零全经济产出 (冷启动死亡螺旋).
+        """
         f = Firm(id="f", sector="s", productivity=1.0, employees=10)
         assert f.production() == pytest.approx(10.0)
+        f.io_input_share = 0.10
         f.input_utilization = 0.5
-        assert f.production() == pytest.approx(5.0)
+        # eff_util = 1 − 0.10 × 0.5 = 0.95
+        assert f.production() == pytest.approx(9.5)
+        f.input_utilization = 0.0
+        # 全缺 → 损失恰为一个成本份额
+        assert f.production() == pytest.approx(9.0)
+        f.io_input_share = 0.0
+        assert f.production() == pytest.approx(10.0)  # 无 IO 约束 → 不折减
 
     def test_ces_also_gated(self):
         f = Firm(
             id="f", sector="s", employees=100, capital=100.0,
             production_function="ces", sigma_elasticity=0.5,
-            input_utilization=0.8,
+            input_utilization=0.8, io_input_share=0.25,
         )
         base = Firm(
             id="g", sector="s", employees=100, capital=100.0,
             production_function="ces", sigma_elasticity=0.5,
             input_utilization=1.0,
         )
-        assert abs(f.production() / base.production() - 0.8) < 1e-9
+        # eff_util = 1 − 0.25 × 0.2 = 0.95
+        assert abs(f.production() / base.production() - 0.95) < 1e-9
 
 
 class TestSupplyChainAcceptance:
@@ -65,7 +78,9 @@ class TestSupplyChainAcceptance:
 
     def test_supply_shock_propagates_downstream(self):
         """能源 TFP 被打 25 折 → 下游利用率显著 <1 (断供传导涌现)."""
-        sim = _sc_sim(seed=5, n_ticks=12)
+        # io_warmup_months=0: 本测试验证断供传导机制, 不被冷启动预热掩盖
+        # (PR-7 引入预热后, 前 12 月产出不按利用率折减).
+        sim = _sc_sim(seed=5, n_ticks=12, io_warmup_months=0)
         energy = next(
             f for f in sim.state.firms if f.sector == "energy"
         )

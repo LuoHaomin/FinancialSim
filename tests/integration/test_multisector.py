@@ -24,15 +24,6 @@ def _multisector_config(**kwargs) -> SimConfig:
         "n_ticks": 36,
         "sectors": list(ALL_SECTORS),
         "enable_housing": False,   # 隔离住房通道, 聚焦多部门记账
-        # Phase 3.5 PR-5: 模块默认开; 本文件验收多部门实流记账语义,
-        # 显式关掉其余模块以隔离变量 (全开动态待 PR-7 校准).
-        "enable_bond_market": False,
-        "enable_consumer_credit": False,
-        "enable_stock_market": False,
-        "enable_cross_holdings": False,
-        "enable_investment_bank": False,
-        "enable_asset_manager": False,
-        "enable_supply_chain": False,
     }
     defaults.update(kwargs)
     return SimConfig(**defaults)

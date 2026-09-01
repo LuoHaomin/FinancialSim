@@ -39,8 +39,10 @@ def baseline_run():
 
     config = SimConfig(
         n_households=200, n_ticks=120, seed=42,
-        # Phase 3.5 PR-5: 模块默认开. 本套件的矩阈值按 PR-5 之前的核心
-        # 经济校准 (见各断言内的校准注释); 全开动态的矩再校准留给 PR-7.
+        # PR-7 注: 本套件矩阈值按 PR-5 之前的核心经济校准. 行为类验收
+        # 已解除钉住 (全开通过); 本套件仍全关 — 全开下 log-wealth 偏度
+        # -1.1~-1.5 (债券强制融资的流动性再分配 + 财富向股票/基金迁移),
+        # 属真实的分布再校准课题, 留待 PR-7 后续单独调参.
         enable_bond_market=False,
         enable_consumer_credit=False,
         enable_stock_market=False,
@@ -52,6 +54,7 @@ def baseline_run():
     sim = Simulation(config)
     sim.run(n_ticks=120)
     return sim
+
 
 
 @pytest.fixture(scope="module")
