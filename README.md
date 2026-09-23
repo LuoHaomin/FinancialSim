@@ -17,7 +17,7 @@
 | Phase 4 | 🚧 MVP 可用 | FastAPI 服务层 + Svelte 宏观看板 + 干预网关；网络视图/编辑器/教程为二期 |
 | Phase 5 | ⏳ 待开始 | 校准与验证 (FRED/SCF 数据接入) |
 
-测试基线：**341 passed · 1 xfail · ruff clean**；7 个场景 × 多种子零 SFC 违反。
+测试基线：**447 passed · 1 xfail · ruff clean**；7 个场景 × 多种子零 SFC 违反。
 
 ## 快速开始
 
@@ -27,7 +27,7 @@
 brew install uv          # 如果还没有 uv
 uv sync --extra dev      # 安装依赖 (Python 3.12)
 
-uv run pytest -q         # 全量测试 (~14s, 341 个)
+uv run pytest -q         # 全量测试 (~190s, 447 个)
 uv run ruff check .      # Lint
 ```
 
