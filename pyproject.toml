@@ -162,5 +162,6 @@ precision = 1
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
-    "httpx2>=2.12.0",
+    # anyio<4 pinned: 4.x deprecates anyio.abc.BlockingPortal which starlette testclient still imports; pytest filterwarnings=error turns the DeprecationWarning into a collection error. httpx2 dropped: redundant with httpx (already in project.optional-dependencies.dev) and requires anyio>=4, blocking the pin.
+    "anyio<4",
 ]
