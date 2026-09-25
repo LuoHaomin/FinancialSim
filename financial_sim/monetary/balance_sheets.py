@@ -39,6 +39,11 @@ class HouseholdBalanceSheet:
     other_debt: float = 0.0
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 现金 + 存款 + 股票 + 债券 + 自住房 + 投资房 + 耐用品 之和.
+        """
         return (
             self.cash + self.deposits + self.stocks + self.bonds
             + self.housing_self + self.housing_investment
@@ -46,10 +51,20 @@ class HouseholdBalanceSheet:
         )
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 房贷 + 消费贷 + 其他债务 之和.
+        """
         return self.mortgage + self.consumer_loan + self.other_debt
 
     @property
     def net_worth(self) -> float:
+        """净资产.
+
+        Returns:
+            float: ``sum_assets() - sum_liabilities()`` (普通部门口径).
+        """
         return self.sum_assets() - self.sum_liabilities()
 
 
@@ -78,6 +93,11 @@ class FirmBalanceSheet:
     minority_equity: float = 0.0           # 被其他企业持有的本企业股权 (镜像科目)
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 现金 + 存款 + 存货 + 资本 + 应收账款 + 跨企业股权市值 之和.
+        """
         return (
             self.cash + self.deposits + self.inventories
             + self.capital_stock + self.interfirm_claims
@@ -85,6 +105,11 @@ class FirmBalanceSheet:
         )
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 银行贷款 + 公司债 + 应付账款 + 少数股东权益 之和.
+        """
         return (
             self.bank_loans + self.bonds_issued
             + self.accounts_payable + self.minority_equity
@@ -92,6 +117,11 @@ class FirmBalanceSheet:
 
     @property
     def net_worth(self) -> float:
+        """净资产.
+
+        Returns:
+            float: ``sum_assets() - sum_liabilities()`` (普通部门口径).
+        """
         return self.sum_assets() - self.sum_liabilities()
 
 
@@ -125,6 +155,16 @@ class CommercialBankBalanceSheet:
     capital: float = 0.0
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 准备金 + 企业贷款 + 居民贷款 + 持有政府债 + 银行间应收
+                + 止赎房产 + 破产清算资产 + 回购融出债权 之和.
+
+        Note:
+            ``repo_claims`` 字段在早期序列化数据中可能缺失; 用 ``getattr``
+            默认 0 以保证向后兼容.
+        """
         return (
             self.reserves + self.loans_to_firms + self.loans_to_households
             + self.gov_bonds_held + self.interbank_claims + self.reo_value
@@ -133,6 +173,12 @@ class CommercialBankBalanceSheet:
         )
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 居民存款 + 企业存款 + 非银金融机构存款 + 银行间债务
+                + 自身发行债券 之和.
+        """
         return (
             self.deposits_from_hh + self.deposits_from_firms
             + self.deposits_from_nbfi + self.interbank_debt
@@ -141,6 +187,15 @@ class CommercialBankBalanceSheet:
 
     @property
     def net_worth(self) -> float:
+        """净资产 (资本口径).
+
+        银行的净资产由 ``capital`` 字段独立追踪, 不通过
+        ``sum_assets() - sum_liabilities()`` 推导. 隐含不变量:
+        ``sum_assets() == sum_liabilities() + capital``.
+
+        Returns:
+            float: ``self.capital``.
+        """
         # 银行的 NW = 资本字段. 隐含不变量: A = L + capital.
         return self.capital
 
@@ -162,13 +217,30 @@ class GovernmentBalanceSheet:
     bonds_outstanding: float = 0.0
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 财政部存款 + 其他资产 之和.
+        """
         return self.treasury_deposits + self.other_assets
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 未偿政府债券余额.
+        """
         return self.bonds_outstanding
 
     @property
     def net_worth(self) -> float:
+        """净资产.
+
+        政府部门的 NW 通常为负 (债务 > 资产).
+
+        Returns:
+            float: ``sum_assets() - sum_liabilities()`` (普通部门口径).
+        """
         return self.sum_assets() - self.sum_liabilities()
 
 
@@ -195,13 +267,31 @@ class CentralBankBalanceSheet:
     capital: float = 0.0
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 持有政府债 + 最后贷款人债权 + 其他资产 之和.
+        """
         return self.gov_bonds + self.lolr_claims + self.other_assets
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 银行准备金 + 流通货币 + 财政部存款 (央行侧为负债) 之和.
+        """
         return self.bank_reserves + self.currency_issued + self.treasury_deposits
 
     @property
     def net_worth(self) -> float:
+        """净资产 (资本口径).
+
+        中央银行的净资产由 ``capital`` 字段独立追踪. 隐含不变量:
+        ``sum_assets() == sum_liabilities() + capital``.
+
+        Returns:
+            float: ``self.capital``.
+        """
         return self.capital
 
 
@@ -226,13 +316,31 @@ class InvestmentBankBalanceSheet:
     capital: float = 0.0
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 在商行存款 + 股票持仓市值 之和.
+        """
         return self.deposits + self.stocks
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 回购融资余额.
+        """
         return self.repo_debt
 
     @property
     def net_worth(self) -> float:
+        """净资产 (资本口径).
+
+        投资银行的净资产由 ``capital`` 字段独立追踪. 隐含不变量:
+        ``sum_assets() == sum_liabilities() + capital``.
+
+        Returns:
+            float: ``self.capital``.
+        """
         return self.capital
 
 
@@ -253,11 +361,30 @@ class AssetManagerBalanceSheet:
     capital: float = 0.0
 
     def sum_assets(self) -> float:
+        """求和所有资产字段.
+
+        Returns:
+            float: 现金缓冲池存款 + 代客股票持仓市值 之和.
+        """
         return self.deposits + self.stocks
 
     def sum_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        Returns:
+            float: 基金份额 NAV (家庭对资管的赎回权).
+        """
         return self.fund_nav_liability
 
     @property
     def net_worth(self) -> float:
+        """净资产 (资本口径).
+
+        资管作为过账机构: ``sum_assets() == sum_liabilities()``,
+        ``capital`` 恒为 0. 隐含不变量:
+        ``sum_assets() == sum_liabilities() + capital``.
+
+        Returns:
+            float: ``self.capital`` (始终 0).
+        """
         return self.capital
