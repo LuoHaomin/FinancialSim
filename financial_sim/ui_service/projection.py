@@ -20,7 +20,17 @@ SERIES_KEYS = (
 
 
 def macro_frame(state: SimulationState) -> dict:
-    """单 tick 的 WS 帧 macro 部分 (与 SERIES_KEYS 对齐 + 房价)."""
+    """单 tick 的 WS 帧 macro 部分 (与 SERIES_KEYS 对齐 + 房价).
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict: 9 个标量键 (real_gdp/nominal_gdp/inflation_yoy/
+        unemployment_rate/policy_rate/avg_wage/total_consumption/
+        total_output/housing_price), 全部四舍五入到 6 位小数.
+        央行缺失时 policy_rate 默认为 0.0.
+    """
     return {
         "real_gdp": round(state.real_gdp, 6),
         "nominal_gdp": round(state.nominal_gdp, 6),
@@ -42,6 +52,15 @@ def series(state: SimulationState, from_t: int = 0,
 
     MacroSnapshot 全字段 + 派生历史 (housing_price / price_level,
     按 tick 逐一对齐; 未覆盖的 tick 填 None).
+
+    Args:
+        state: 当前 SimulationState 快照.
+        from_t: 起始 tick (含), 默认 0.
+        to_t: 结束 tick (含), None 表示到最新.
+
+    Returns:
+        dict: 列式时序, 键 = 't' + SERIES_KEYS + ('housing_price',
+        'price_level'); 每列长度一致; 派生列缺数据时填 None.
     """
     rows = [
         m for m in state.macro_history
@@ -67,14 +86,31 @@ def series(state: SimulationState, from_t: int = 0,
 
 
 def _position_of(history: list, t: int) -> int:
-    """macro_history 中 t 的位置 (history 按 t 递增, 每 tick 一条)."""
+    """macro_history 中 t 的位置 (history 按 t 递增, 每 tick 一条).
+
+    Args:
+        history: MacroSnapshot 列表 (按 t 单调递增).
+        t: 目标 tick.
+
+    Returns:
+        int: 列表索引; 空列表返回 -1.
+    """
     if not history:
         return -1
     return t - history[0].t
 
 
 def firms_table(state: SimulationState) -> list[dict]:
-    """L2 企业列表投影."""
+    """L2 企业列表投影.
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        list[dict]: 每元素 8 个键 (id/sector/employees/price/
+        deposits/debt/last_sales/is_bankrupt); 金额字段四舍五入
+        到 4 位小数.
+    """
     return [
         {
             "id": f.id,
@@ -91,7 +127,17 @@ def firms_table(state: SimulationState) -> list[dict]:
 
 
 def banks_table(state: SimulationState) -> list[dict]:
-    """L2 银行列表投影."""
+    """L2 银行列表投影.
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        list[dict]: 每元素 7 个键 (id/capital/car/reserves/
+        loans_to_firms/loans_to_households/is_failed). 资产为 0
+        的银行 car 字段为 None; 其余 car 四舍五入到 6 位,
+        金额字段到 4 位.
+    """
     return [
         {
             "id": b.id,
@@ -108,7 +154,17 @@ def banks_table(state: SimulationState) -> list[dict]:
 
 def agent_detail(state: SimulationState, sector: str,
                  agent_id: str) -> dict | None:
-    """L3 单主体资产负债表投影 (MVP: firms/banks)."""
+    """L3 单主体资产负债表投影 (MVP: firms/banks).
+
+    Args:
+        state: 当前 SimulationState 快照.
+        sector: 部门标识, 支持 'firms' / 'banks'; 其他值返回 None.
+        agent_id: 主体 id (firm.id 或 bank.id).
+
+    Returns:
+        dict | None: 资产负债表字典 (含 assets / liabilities /
+        net_worth 或 capital / 运营/合规字段), 找不到主体时返回 None.
+    """
     if sector == "firms":
         f = next((x for x in state.firms if x.id == agent_id), None)
         if f is None:
@@ -166,6 +222,16 @@ def agent_detail(state: SimulationState, sector: str,
 
 
 def shock_log_view(state: SimulationState, limit: int = 200) -> list[dict]:
+    """最近 N 条冲击日志 (倒序截断, 保留原顺序).
+
+    Args:
+        state: 当前 SimulationState 快照.
+        limit: 最多返回条数, 默认 200.
+
+    Returns:
+        list[dict]: 截取的 shock_log 末尾切片 (引用的是原 dict,
+        仅视图, 不复制内容).
+    """
     return list(state.shock_log[-limit:])
 
 
@@ -197,7 +263,17 @@ SECTOR_LABELS = {
 
 
 def sectors_matrix(state: SimulationState) -> dict:
-    """7 部门资产负债表 → Godley 矩阵 (含 A = L + NW 校验标记)."""
+    """7 部门资产负债表 → Godley 矩阵 (含 A = L + NW 校验标记).
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict: 形如 {'t': int, 'sectors': {sector: {label, assets,
+        liabilities, capital, total_assets, total_liabilities,
+        net_worth, balanced}}}. zero-value 字段会被剔除;
+        balanced = abs(TA - TL - NW) <= 1e-6 * max(1, |TA|).
+    """
     bs = state.build_balance_sheets()
     sectors: dict[str, dict] = {}
     for name, sheet in bs.items():
@@ -235,7 +311,15 @@ def sectors_matrix(state: SimulationState) -> dict:
 # ════════════════════════════════════════════════════════════════
 
 def _gini(values: list[float]) -> float:
-    """Gini 系数 (0=完全平等, 1=完全不平等)."""
+    """Gini 系数 (0=完全平等, 1=完全不平等).
+
+    Args:
+        values: 非负样本列表 (家庭财富或收入).
+
+    Returns:
+        float: 0.0 (空列表或非正总和) ~ 1.0 (极端集中);
+        计算按排序累计法: (2*Σi*x_i)/(n*Σx) - (n+1)/n.
+    """
     n = len(values)
     if n == 0:
         return 0.0
@@ -250,7 +334,16 @@ def _gini(values: list[float]) -> float:
 
 
 def _quintile_means(values: list[float]) -> list[float]:
-    """按排序五等分的组均值 (低→高)."""
+    """按排序五等分的组均值 (低→高).
+
+    Args:
+        values: 任意非空数值样本 (财富/收入).
+
+    Returns:
+        list[float]: 长度为 5 的列表, 第 i 个元素是排序后
+        第 i 个五分位组的算术均值 (四舍五入到 4 位小数);
+        空输入时返回 5 个 0.0.
+    """
     n = len(values)
     if n == 0:
         return [0.0] * 5
@@ -262,7 +355,17 @@ def _quintile_means(values: list[float]) -> list[float]:
 
 
 def households_stats(state: SimulationState) -> dict:
-    """家庭部门聚合: 财富/收入分布、住房、就业、债务压力."""
+    """家庭部门聚合: 财富/收入分布、住房、就业、债务压力.
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict: 含就业率、财富/收入 Gini、五等分组均值、Top10
+        财富份额、自有住房率、按揭违约/水下比例、失业分布、
+        财富直方图 (12 箱) 等; 部分字段在样本为 0 或总和
+        为非正时返回 None.
+    """
     price = getattr(state.stock_market, "price", 0.0) or 0.0
     hp = state.housing_price
     wealths, incomes = [], []
@@ -339,6 +442,15 @@ def households_stats(state: SimulationState) -> dict:
 
 
 def _hist_edges(xs_sorted: list[float], bins: int) -> list[float]:
+    """等宽直方图箱边界 (含两端, 共 bins+1 个值).
+
+    Args:
+        xs_sorted: 已排序的样本.
+        bins: 箱数.
+
+    Returns:
+        list[float]: 边界数组 (长度 bins+1); 输入退化时返回 [].
+    """
     if not xs_sorted or xs_sorted[-1] <= xs_sorted[0]:
         return []
     lo, span = xs_sorted[0], xs_sorted[-1] - xs_sorted[0]
@@ -350,6 +462,15 @@ def _hist_edges(xs_sorted: list[float], bins: int) -> list[float]:
 # ════════════════════════════════════════════════════════════════
 
 def government_view(state: SimulationState) -> dict | None:
+    """政府面板: 资产负债 + 流量 + 财政参数.
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict | None: 含 assets/liabilities/net_worth/flows/parameters
+        五个子表; state.government 缺失时返回 None.
+    """
     g = state.government
     if g is None:
         return None
@@ -376,6 +497,16 @@ def government_view(state: SimulationState) -> dict | None:
 
 
 def central_bank_view(state: SimulationState) -> dict | None:
+    """央行面板: 资产负债 + 政策参数 + 货币基数.
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict | None: 含 assets/liabilities/capital/policy/
+        monetary_base; LOLR 敞口聚合自 state.banks;
+        state.central_bank 缺失时返回 None.
+    """
     cb = state.central_bank
     if cb is None:
         return None
@@ -410,7 +541,17 @@ def central_bank_view(state: SimulationState) -> dict | None:
 # ════════════════════════════════════════════════════════════════
 
 def network_view(state: SimulationState, kind: str) -> dict | None:
-    """邻接结构 → 节点/边列表 (权重 = 敞口规模)."""
+    """邻接结构 → 节点/边列表 (权重 = 敞口规模).
+
+    Args:
+        state: 当前 SimulationState 快照.
+        kind: 'interbank' (同业敞口, 双向合并) 或
+            'cross_holdings' (交叉持股, 按市值计权).
+
+    Returns:
+        dict | None: {'t', 'kind', 'nodes', 'edges'}, 边按 value
+        降序; kind 不识别时返回 None.
+    """
     if kind == "interbank":
         net = state.interbank_network
         nodes = [
@@ -475,6 +616,17 @@ def network_view(state: SimulationState, kind: str) -> dict | None:
 # ════════════════════════════════════════════════════════════════
 
 def stress_view(state: SimulationState) -> dict:
+    """危机遥测面板: 抛压 / 银行 CAR / 住房 / 股市.
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict: 含 fire_sale_pressure/housing_expectations_factor/
+        failed_banks*/bankrupt_firms/bank_car (min/max/mean/
+        below_requirement)/housing/stock_price; config.car_requirement
+        缺失时 fallback 0.08.
+    """
     housing = state.housing_market
     cars = [
         round(b.car(), 6) for b in state.banks if b.total_assets() > 0
@@ -525,7 +677,15 @@ def stress_view(state: SimulationState) -> dict:
 # ════════════════════════════════════════════════════════════════
 
 def sfc_view(state: SimulationState) -> dict:
-    """逐 tick SFC 违反记录 (t 从 1 起, 与 sfc_violations 索引对应)."""
+    """逐 tick SFC 违反记录 (t 从 1 起, 与 sfc_violations 索引对应).
+
+    Args:
+        state: 当前 SimulationState 快照.
+
+    Returns:
+        dict: {'total_count': 累计违反条数, 'detail': 后 200 个
+        非空违反项, 每项 {'t': tick, 'errors': [str, ...]}}.
+    """
     detail = [
         {"t": i + 1, "errors": errs}
         for i, errs in enumerate(state.sfc_violations)
