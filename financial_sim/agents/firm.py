@@ -112,9 +112,21 @@ class Firm:
         return eff_a * (k_term + l_term) ** (1.0 / rho)
 
     def revenue(self) -> float:
+        """当期收入 = 产量 × 当前价格.
+
+        Returns:
+            float: production() (受生产函数 + 投入利用率影响) 乘以
+                当前 self.price. 注意不扣除任何成本.
+        """
         return self.production() * self.price
 
     def labor_cost(self) -> float:
+        """当期工资总额 = 雇员数 × 工资率.
+
+        Returns:
+            float: 雇员数 × wage_offered. 简化: 无加班/工时区分, 不含
+                社保/福利; 折旧与利息已分别通过 capital 与 debt 路径反映.
+        """
         return self.employees * self.wage_offered
 
     def equity(self) -> float:

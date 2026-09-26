@@ -41,6 +41,21 @@ class InvestmentBank:
 
     @classmethod
     def from_config(cls, config) -> InvestmentBank:
+        """从配置对象构造 InvestmentBank 实例.
+
+        读取三类风控参数 (其余字段在 simulation 启动后由 step 层写入):
+            - ib_leverage_max: 名义最大杠杆 (默认 5.0)
+            - ib_margin_requirement: capital/assets 下限 (默认 0.08)
+            - ib_var_budget: VaR 预算 k (默认 2.0)
+
+        Args:
+            config: 全局配置对象, 需含 ``ib_leverage_max`` /
+                ``ib_margin_requirement`` / ``ib_var_budget`` 三个可选字段
+                (缺失则用默认值).
+
+        Returns:
+            InvestmentBank: 全新实例, 默认 id="ib_1".
+        """
         return cls(
             id="ib_1",
             leverage_max=float(getattr(config, "ib_leverage_max", 5.0)),
@@ -49,9 +64,28 @@ class InvestmentBank:
         )
 
     def position_value(self, price: float) -> float:
+        """持仓市值 = 持仓单位 × 当前价格.
+
+        Args:
+            price: float, 当前股票指数价格.
+
+        Returns:
+            float: 持仓端市值, 忽略现金存款端 (deposits 另计入 margin_call_gap).
+        """
         return self.stock_units * price
 
     def leverage(self, price: float) -> float:
+        """实际杠杆率 = 持仓市值 / 资本.
+
+        资本 ≤ 1e-9 时视为 1e-9 以避免除零 (此时若持仓市值 > 0 则
+        杠杆为极大值, 触发 margin_call_gap 报警).
+
+        Args:
+            price: float, 当前股票价格.
+
+        Returns:
+            float: 杠杆倍数. 与 ``target_leverage()`` 比较用于去杠杆决策.
+        """
         cap = self.capital if self.capital > 1e-9 else 1e-9
         return self.position_value(price) / cap
 

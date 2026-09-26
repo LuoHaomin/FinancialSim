@@ -70,6 +70,15 @@ class CommercialBank:
     # ── 计算方法 ──
 
     def total_assets(self) -> float:
+        """求和所有资产字段.
+
+        覆盖: 准备金、对企业贷款、对家庭贷款 (含按揭 + 消费贷)、持有政府债、
+        同业拆出债权、止赎房产账面值 (reo_value)、破产企业清算资产接收值
+        (seized_assets)、回购融出债权 (对投行).
+
+        Returns:
+            float: 银行资产端合计. 用于 CAR 与资产负债表校验.
+        """
         return (
             self.reserves
             + self.loans_to_firms
@@ -82,6 +91,15 @@ class CommercialBank:
         )
 
     def total_liabilities(self) -> float:
+        """求和所有负债字段.
+
+        覆盖: 家庭存款、企业存款、非银金融机构存款 (i-bank/资管)、
+        同业拆入、最后贷款人债务.
+
+        Returns:
+            float: 银行负债端合计. SFC 不变量: total_assets ==
+                total_liabilities + capital.
+        """
         return (
             self.deposits_from_hh
             + self.deposits_from_firms

@@ -32,12 +32,42 @@ class AssetManager:
 
     @classmethod
     def from_config(cls, config) -> AssetManager:
+        """从配置对象构造 AssetManager 实例.
+
+        当前只读取 id 字段 ("am_1"); 其余状态在 simulation 启动后由
+        step 层依家庭申购/赎回流写入.
+
+        Args:
+            config: 全局配置对象 (实际未用字段, 保留以与同模块其他
+                agent 的 ``from_config`` 接口一致).
+
+        Returns:
+            AssetManager: 全新实例, 默认字段全 0.
+        """
         return cls(id="am_1")
 
     def assets_value(self, price: float) -> float:
+        """总资产市值 = 现金池 + 持仓市值.
+
+        Args:
+            price: float, 当前股票指数价格 (用于估持仓).
+
+        Returns:
+            float: 资产端总市值. 注意: 资管无独立资本, sum_assets ==
+                sum_liabilities + 0 (NAV 由份额分摊, 不是 NW).
+        """
         return self.deposits + self.stock_units * price
 
     def nav(self, price: float) -> float:
+        """单位基金净值 NAV = 总资产 / 已发行份额. 未发行时锚指数价.
+
+        Args:
+            price: float, 当前股票价格.
+
+        Returns:
+            float: NAV. 当 ``fund_units_outstanding`` 极小或为 0 时
+                返回 ``price`` (尚未发行的退化情形, 与指数同步).
+        """
         if self.fund_units_outstanding <= 1e-9:
             return price                                # 未发行按指数价锚
         return self.assets_value(price) / self.fund_units_outstanding
