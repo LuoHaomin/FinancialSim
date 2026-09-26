@@ -62,6 +62,16 @@ def _to_dict(obj: object) -> dict:
 
 
 def _from_dict(d: dict, cls: type) -> object:
+    """从 dict 重建 dataclass 实例, 过滤掉 dataclass 不识别的字段.
+
+    Args:
+        d: 待还原的 dict, 通常来自 JSON 快照; 可能含 _type 等多余键.
+        cls: 目标 dataclass 类型.
+
+    Returns:
+        cls(**kwargs) 的新实例. 不识别的字段被丢弃(避免版本间字段差异导致
+        dataclass __init__ 抛 TypeError).
+    """
     valid = {f.name for f in fields(cls)}
     kwargs = {k: v for k, v in d.items() if k in valid}
     return cls(**kwargs)
@@ -72,6 +82,15 @@ class StateSnapshot:
 
     @classmethod
     def save(cls, sim: Simulation, path: str | Path) -> Path:
+        """把仿真状态序列化到 JSON 文件.
+
+        Args:
+            sim: 当前 Simulation 实例; 读 sim.seed, sim.config 与 sim.state.
+            path: 输出文件路径; 不存在的父目录会被自动创建.
+
+        Returns:
+            写入文件的 Path 对象. 文件覆盖语义(open with "w").
+        """
         state = sim.state
         payload = {
             "_version": SNAPSHOT_VERSION,
@@ -126,6 +145,19 @@ class StateSnapshot:
 
     @classmethod
     def load(cls, path: str | Path) -> Simulation:
+        """从 JSON 文件还原仿真.
+
+        Args:
+            path: 快照文件路径.
+
+        Returns:
+            还原后的 Simulation 实例(state.t / households / firms / banks /
+            housing / government / cb / inflation_expectation / macro_history
+            及宏观标量全部还原).
+
+        Raises:
+            SnapshotError: 快照版本号与 SNAPSHOT_VERSION 不一致时抛出.
+        """
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         version = payload.get("_version")
         if version != SNAPSHOT_VERSION:

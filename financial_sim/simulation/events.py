@@ -129,12 +129,28 @@ class EventManager:
     """
 
     def __init__(self, events: list[ShockEvent] | None = None) -> None:
+        """初始化管理器.
+
+        Args:
+            events: 初始事件列表; 传 None 等价于空列表. 内部复制为新 list,
+                外部对原列表的后续修改不影响本管理器.
+        """
         self.events: list[ShockEvent] = list(events or [])
 
     def add(self, event: ShockEvent) -> None:
+        """追加单个事件到末尾.
+
+        Args:
+            event: 要加入的 ShockEvent 实例.
+        """
         self.events.append(event)
 
     def extend(self, events: list[ShockEvent]) -> None:
+        """批量追加事件.
+
+        Args:
+            events: 要追加的事件列表; 与 list.extend 语义一致, 即追加全部元素.
+        """
         self.events.extend(events)
 
     def active_at(self, t: int) -> list[ShockEvent]:
@@ -218,9 +234,26 @@ class EventManager:
     # ── 状态读取 ──
 
     def get_gov_spending_multiplier(self, state: Any) -> float:
+        """读取当前 state 上由 gov_spending 通道设置的支出乘数.
+
+        Args:
+            state: 仿真状态对象.
+
+        Returns:
+            state 上 _gov_spending_multiplier 的值, 若未设置(无冲击)则回退到 1.0.
+        """
         return getattr(state, "_gov_spending_multiplier", 1.0)
 
     def get_income_tax_rate(self, state: Any, default: float) -> float:
+        """读取当前 state 上由 tax_rate 通道设置的所得税率覆盖值.
+
+        Args:
+            state: 仿真状态对象.
+            default: 未触发 tax_rate 冲击时使用的所得税率基线.
+
+        Returns:
+            覆盖值(若有)或 default. 调用方负责把返回值传入财政税计算路径.
+        """
         override = getattr(state, "_income_tax_rate_override", None)
         return default if override is None else override
 

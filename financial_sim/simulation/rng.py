@@ -23,6 +23,13 @@ class RNGManager:
     """
 
     def __init__(self, seed: int = 42) -> None:
+        """初始化命名流管理器.
+
+        Args:
+            seed: 全局随机种子; 同一 seed 下, 各命名流派生出的子序列
+                互相统计独立(由 SeedSequence + 字符串稳定哈希派生).
+                默认 42 与 IMPLEMENTATION.md §1.1 约定的复现基线一致.
+        """
         self.seed = seed
         self._streams: dict[str, np.random.Generator] = {}
         self._stream_calls: dict[str, int] = {}

@@ -27,6 +27,15 @@ class CrossHoldingsNetwork:
     beta: float = 0.2                       # 发行人划给企业股东的比例
 
     def held_units(self, holder_id: str) -> dict[str, float]:
+        """读取某持有人对各发行人的持股单位数.
+
+        Args:
+            holder_id: 持有人企业 ID.
+
+        Returns:
+            该持有人对各发行人的持股 {issuer_id: units}; 若无持股返回空 dict
+            (而非修改网络).
+        """
         return self.edges.get(holder_id, {})
 
     def valuation(self, holder_id: str, prices: dict[str, float]) -> float:
@@ -38,6 +47,12 @@ class CrossHoldingsNetwork:
 
     @property
     def total_units(self) -> float:
+        """全网持有的总股数(所有 holder → issuer 边上的 units 之和).
+
+        Returns:
+            Σ units; 用于核对 SFC 守恒(应等于各发行人已发行到企业股东的
+            股数总和, 除非数据损坏).
+        """
         return sum(u for tgt in self.edges.values() for u in tgt.values())
 
     def issued_units_to_firms(self) -> dict[str, float]:
