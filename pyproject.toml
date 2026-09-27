@@ -29,9 +29,9 @@ dependencies = [
     "numba>=0.58,<1.0",
     "scipy>=1.11,<2.0",
     "networkx>=3.2,<4.0",
-    "pyarrow>=14,<16.0",
+    "pyarrow>=14,<17.0",  # relaxed from <16.0 to allow 16.x minor upgrades (installed 15.0.2; pin preserved for stability)
     "duckdb>=0.9,<2.0",
-    "pydantic>=2.5,<3.0",
+    "pydantic>=2.13,<3.0",  # raised lower bound from >=2.5 to >=2.13 (currently installed/tested 2.13.5)
     "pyyaml>=6.0,<7.0",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.4",
@@ -137,6 +137,11 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning:numba",
     "ignore::DeprecationWarning:pandas",
+    # starlette 1.6+ TestClient prefers `httpx2`; plain `httpx` still works but emits
+    # StarletteDeprecationWarning. We pin `httpx` for the anyio<4 dependency story
+    # (httpx2 requires anyio>=4, conflicting with #A's pytest-collection fix), so
+    # silence the warning instead. See cron #C 2026-09-27.
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
 
 # ════════════════════════════════════════════════════════════
